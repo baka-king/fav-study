@@ -16,7 +16,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, backup, cache, classify, config, db, deep, douyin, douyin_actions, dsh, insights, llm, notes, ocr, recheck, transcribe, weekly, winfocus, xhs
+from . import __version__, backup, bili, cache, cataudit, classify, config, db, deep, imgcache, douyin, douyin_actions, dsh, insights, llm, notes, ocr, recheck, transcribe, weekly, winfocus, xhs
 from .worker import Worker, scan_inbox
 
 _DEPS = None
@@ -341,7 +341,12 @@ def open_path(p):
     p = str(p)
     sysname = platform.system()
     if sysname == "Windows":
-        os.startfile(p)  # noqa
+        # 有些环境（提权/沙箱/非交互会话）里 os.startfile 会报 WinError 5，
+        # 直接用 explorer 打开目录更稳。
+        try:
+            os.startfile(p)  # noqa
+        except OSError:
+            subprocess.Popen(["explorer.exe", p])
     elif sysname == "Darwin":
         subprocess.Popen(["open", p])
     else:
@@ -352,7 +357,7 @@ def reveal(p):
     p = str(p)
     sysname = platform.system()
     if sysname == "Windows":
-        subprocess.Popen(["explorer", "/select,", p])
+        subprocess.Popen(["explorer.exe", "/select," + p])
     elif sysname == "Darwin":
         subprocess.Popen(["open", "-R", p])
     else:
@@ -370,9 +375,17 @@ class Handler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- 工具
     def _json(self, data, code=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        enc = (self.headers.get("Accept-Encoding") or "").lower()
+        gz = "gzip" in enc and len(body) > 2048
+        if gz:
+            import gzip as _gz
+            body = _gz.compress(body, 6)
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -405,9 +418,18 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript",):
             ctype += "; charset=utf-8"
+        enc = (self.headers.get("Accept-Encoding") or "").lower()
+        gz = "gzip" in enc and len(data) > 2048 and (
+            ctype.startswith("text/") or "javascript" in ctype or "json" in ctype or "svg" in ctype)
+        if gz:
+            import gzip as _gz
+            data = _gz.compress(data, 6)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
@@ -624,10 +646,18 @@ class Handler(BaseHTTPRequestHandler):
             if f.suffix.lower() == ".webp":
                 ctype = "image/webp"
             data = f.read_bytes()
+            etag = '"%d-%d"' % (int(f.stat().st_mtime), len(data))
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "max-age=86400")
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")   # 文件可能被修复/替换，必须回源校验
             self.end_headers()
             self.wfile.write(data)
             return
@@ -635,6 +665,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ping":
             # 启动器探活用：不读数据库、不读配置，必须秒回
             return self._json({"ok": True, "version": __version__})
+        if path == "/api/audit_cats":
+            try:
+                return self._json(cataudit.run())
+            except Exception as e:
+                return self._err(f"分类自查失败：{str(e)[:80]}", 500)
+        if path == "/api/bili/status":
+            try:
+                from . import bili_login
+                return self._json({"logged_in": bool(bili_login.logged_in())})
+            except Exception:
+                return self._json({"logged_in": False})
+        if path == "/api/today":
+            return self._json(db.today_summary())
         if path == "/api/cache":
             st = cache.stats()
             st["all"] = cache.all_state()
@@ -656,10 +699,8 @@ class Handler(BaseHTTPRequestHandler):
             out.sort(key=lambda x: -x["mtime"])
             st["files"] = out
             return self._json(st)
-        if path == "/api/focus":
-            # 桌面图标再点一次时，把已经打开（可能最小化了）的窗口叫回前面
-            found, ok = winfocus.focus()
-            return self._json({"found": found, "focused": ok})
+        if path == "/api/meta":
+            return self._json({"providers": config.PROVIDERS, "free_plans": config.FREE_PLANS})
         if path == "/api/state":
             # 一次 /api/state 里 db.stats() 要跑两遍、还要读配置读依赖，
             # 多个窗口/标签页每秒轮询一次就把它压垮了。这里缓存 0.8 秒，
@@ -671,8 +712,8 @@ class Handler(BaseHTTPRequestHandler):
             s = config.load()
             st = db.stats()
             payload = {
-                "worker": worker.state, "logs": list(worker.logs)[-80:], "stats": st,
-                "settings": config.public(s), "providers": config.PROVIDERS, "free_plans": config.FREE_PLANS,
+                "worker": dict(worker.state, paused=bool(worker.paused)), "logs": list(worker.logs)[-80:], "stats": st,
+                "settings": config.public(s),
                 "library_dir": str(config.library_dir()), "inbox_dir": str(config.INBOX_DIR),
                 "asr": transcribe.engine_status(),
                 "ocr": ocr.status(), "version": __version__, "deps": deps_status(),
@@ -723,27 +764,38 @@ class Handler(BaseHTTPRequestHandler):
             u = (q("u") or "").strip()
             if not u:
                 return self._err("缺 u")
-            import urllib.parse as _up
-            host = (_up.urlparse(u).hostname or "").lower()
-            if not (host.endswith("douyinpic.com") or host.endswith("byteimg.com")
-                    or host.endswith("douyin.com") or host.endswith("tos-cn-i-") or "tos-cn" in host):
+            if not imgcache.allowed(u):
                 return self._err("不代理这个域名", 403)
             try:
-                req = urllib.request.Request(u, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": "https://www.douyin.com/"})
-                with urllib.request.urlopen(req, timeout=20) as r:
-                    body = r.read()
-                    ctype = r.headers.get("Content-Type") or "image/jpeg"
+                body, ctype = imgcache.get(u)
+                import hashlib as _hl
+                etag = '"' + _hl.md5(body).hexdigest() + '"'
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(304)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "max-age=86400")
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(body)
-            except Exception as e:
-                return self._err(f"取图失败：{str(e)[:80]}", 502)
-            return
+            except Exception:
+                # 取不到（图床签名过期等）就回一张 1×1 透明图：卡片底下本来就有占位底色，
+                # 返回 502 只会让浏览器刷一堆红色报错
+                import base64 as _b64
+                blank = _b64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(blank)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(blank)
+                return
         if path == "/api/backups":
             return self._json({"dir": str(backup.BACKUP_DIR), "files": backup.list_auto_backups()})
         if path.startswith("/api/items/") and (path.endswith("/comments") or path.endswith("/dycheck")):
@@ -767,11 +819,36 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 stats, comments = douyin_actions.fetch_meta(aid, want_comments=want_c)
             except Exception as e:
-                return self._err(f"读取抖音信息失败：{str(e)[:100]}", 502)
+                # 浏览器临时打不开之类的：返回空数据（200），页面上不刷红字，用户点刷新还能再来
+                payload = {"comments": [], "stats": {}, "soft_error": str(e)[:100]} if want_c                     else {"stats": {}, "soft_error": str(e)[:100]}
+                return self._json(payload)
             payload = ({"comments": comments, "stats": stats} if want_c else {"stats": stats})
             with _META_LOCK:
                 _META_CACHE[key] = (payload, time.time())
             return self._json(payload)
+        if path.startswith("/api/items/") and path.endswith("/warm"):
+            try:
+                item_id = int(path.split("/")[3])
+            except ValueError:
+                return self._err("bad id")
+            it = db.get(item_id)
+            if not it or not it.get("aweme_id") or (it.get("platform") or "douyin") == "xhs":
+                return self._json({"ok": False})
+            if it.get("play_url") and time.time() - (it.get("play_url_ts") or 0) < 3600:
+                return self._json({"ok": True, "cached": True})
+
+            def _warm():
+                try:
+                    url = dy_runner.fetch_play_url(it["aweme_id"])
+                    if url:
+                        db.update(item_id, play_url=url, play_url_ts=time.time())
+                        dy_runner.remember(it["aweme_id"], url)
+                except Exception:
+                    pass
+
+            import threading as _th
+            _th.Thread(target=_warm, daemon=True).start()
+            return self._json({"ok": True, "queued": True})
         if path.startswith("/api/items/") and path.endswith("/danmaku"):
             try:
                 item_id = int(path.split("/")[3])
@@ -804,7 +881,10 @@ class Handler(BaseHTTPRequestHandler):
                                "n": sum(len(g["items"]) - 1 for g in groups)})
         if path == "/api/items":
             learned = q("learned")
+            since_s = q("since")
+            scope = q("scope")
             return self._json(db.list_items(
+                since=(float(since_s) if since_s else None), scope=scope,
                 status=q("status"), category=q("category"), sub=q("sub"), q=(q("q") or "").strip() or None,
                 learned=None if learned in (None, "") else learned == "1", starred=q("starred") == "1",
                 dur=q("dur"), sort=q("sort", "new") or "new", stage=q("stage"),
@@ -867,12 +947,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/links":
             text = b.get("text", "") or ""
+            jump = bool(b.get("jump", True))   # 手动添加默认插到队首
             links = douyin.extract_links(text)
             added = 0
             xhs_n = 0
+            touched = []
             for link in links:
                 vid, kind = douyin._match_id(link)
-                item_id, new = db.add("link", aweme_id=vid, url=link)
+                item_id, new = db.add("link", aweme_id=vid, url=link, jump=jump)
+                touched.append(item_id)
                 if new and kind == "note":
                     db.update(item_id, media_type="note")
                 elif not new:
@@ -890,15 +973,36 @@ class Handler(BaseHTTPRequestHandler):
                 if not nid:
                     continue
                 item_id, new = db.add("xhs", aweme_id=nid, url=f"https://www.xiaohongshu.com/explore/{nid}",
-                                      platform="xhs")
+                                      platform="xhs", jump=jump)
+                touched.append(item_id)
                 if new:
                     added += 1
                     xhs_n += 1
-            if not links and not xhs_n:
-                return self._err("没找到抖音或小红书链接。粘贴「分享 → 复制链接」得到的整段内容就行。")
+            # B 站：只做手动粘贴（B 站号是共用的，不做自动同步）
+            bili_n = 0
+            for raw in re.findall(r"https?://[^\s一-鿿]+", text):
+                if "bilibili.com" not in raw and "b23.tv" not in raw:
+                    continue
+                bv = bili.match(raw)
+                if not bv:
+                    continue
+                item_id, new = db.add("bili", aweme_id=bv, url=f"https://www.bilibili.com/video/{bv}/",
+                                      platform="bili", jump=jump)
+                touched.append(item_id)
+                if new:
+                    added += 1
+                    bili_n += 1
+            if not links and not xhs_n and not bili_n:
+                return self._err("没找到抖音 / 小红书 / B 站链接。粘贴「分享 → 复制链接」得到的整段内容就行。")
+            if jump:        # 新加的已在队首；已经在队列里的同一条也提到队首
+                for iid in touched:
+                    cur = db.get(iid)
+                    if cur and cur["status"] == "queued":
+                        db.jump(iid)
             if b.get("process", True) and added:
                 worker.submit("process")
-            return self._json({"found": len(links) + xhs_n, "added": added, "xhs": xhs_n})
+            return self._json({"found": len(links) + xhs_n + bili_n, "added": added,
+                               "xhs": xhs_n, "bili": bili_n})
 
         if path == "/api/xhs/login":
             worker.submit("xhs_login", sync=bool(b.get("sync")), limit=int(b.get("limit") or 50))
@@ -1013,6 +1117,35 @@ class Handler(BaseHTTPRequestHandler):
             if n:
                 worker.submit("process")
             return self._json({"added": n})
+        if path == "/api/failures/clean":
+            ids = [int(x) for x in (b.get("ids") or []) if str(x).isdigit()]
+            n = 0
+            for i in ids:
+                it = db.get(i)
+                if it and it["status"] == "failed":
+                    db.trash(i)
+                    n += 1
+            return self._json({"ok": True, "n": n})
+        if path == "/api/pause":
+            worker.paused = True
+            return self._json({"ok": True, "paused": True})
+        if path == "/api/resume":
+            worker.paused = False
+            if not worker.state.get("busy"):
+                worker.submit("process")
+            return self._json({"ok": True, "paused": False})
+        if path == "/api/bili/login":
+            worker.submit("bili_login")
+            return self._json({"ok": True, "msg": "已打开 B 站登录页，扫码即可"})
+        if path == "/api/retry_fetch_failed":
+            worker.submit("retry_fetch_failed")
+            return self._json({"ok": True})
+        if path == "/api/reclassify":
+            worker.submit("reclassify", only=b.get("only") or None)
+            return self._json({"ok": True})
+        if path == "/api/fix_covers":
+            worker.submit("fix_covers")
+            return self._json({"ok": True})
         if path == "/api/open":
             what = b.get("what")
             try:
@@ -1160,7 +1293,7 @@ class Handler(BaseHTTPRequestHandler):
             dcfg = config.llm_cfg(config.load(), "deep")
             if not (dcfg.get("api_key") or "").strip():
                 return self._err("精读用的 AI Key 还没保存。请到「设置」填好 Key，点「测试连接」（成功会自动保存）。")
-            item_id, _ = db.add("paste", title=title, author=str(b.get("author") or "").strip() or None)
+            item_id, _ = db.add("paste", title=title, author=str(b.get("author") or "").strip() or None, jump=True)
             db.update(item_id, transcript=text, status="done")
             deep_runner.submit(item_id)
             return self._json({"id": item_id})
@@ -1226,6 +1359,10 @@ class Handler(BaseHTTPRequestHandler):
             if not it:
                 return self._err("找不到这条", 404)
             act = b.get("action")
+            if act == "retry" and any(k in (it.get("reason") or "") for k in ("抓取失败", "通用页", "播放地址", "没有画面")):
+                # 抓取类的失败：旧的文字稿是垃圾，必须丢掉重新抓
+                db.update(item_id, transcript=None, note=None, images=None, md_path=None)
+                it = db.get(item_id)
             if act in ("retry", "reextract", "include"):
                 if act == "include" and it.get("note"):
                     # 用户认为"无关"的也值得学 → 直接收进学习库，不用再花钱提炼
@@ -1238,6 +1375,17 @@ class Handler(BaseHTTPRequestHandler):
             elif act == "learned":
                 v = bool(b.get("value", True))
                 db.update(item_id, learned=int(v), learned_at=time.time() if v else None)
+            elif act == "jump":
+                # 插队：排到队首，下一个就处理它
+                if it["status"] in ("fetching", "downloading", "transcribing", "extracting"):
+                    return self._err("这条正在处理，不用插队")
+                if it["status"] == "done":
+                    return self._err("这条已经处理完了")
+                db.jump(item_id)
+                db.update(item_id, status="queued", attempts=0, reason=None, auto_skip=2)
+                # 正在跑的那一批不用打断：它每处理完一条都会重新取队首，插队的自然就是下一个
+                if not worker.state.get("busy"):
+                    worker.submit("process")
             elif act == "star":
                 db.update(item_id, starred=int(bool(b.get("value", True))))
             elif act == "note":
@@ -1278,11 +1426,29 @@ class Handler(BaseHTTPRequestHandler):
         return self._err("not found", 404)
 
 
+def _safe_audit():
+    """启动时跑一次分类自查，报告写到 data/tmp/cat_audit.md（不打扰用户）。"""
+    try:
+        r = cataudit.run()
+        n = r.get("suspicious_n", 0)
+        try:
+            worker.log(f"分类自查：疑似分错 {n} 条，报告 data/tmp/cat_audit.md")
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            worker.log(f"分类自查失败：{str(e)[:60]}")
+        except Exception:
+            pass
+
+
 def serve(port=8765, open_browser=True):
     global worker
     tmp = ensure_temp()
     db.init()
     worker = Worker()
+    # 启动时顺手做一次分类自查（纯规则，很快），报告写到 data/tmp/cat_audit.md
+    threading.Thread(target=lambda: _safe_audit(), daemon=True, name="cataudit").start()
     global deep_runner
     deep_runner = deep.DeepRunner(worker.log)
     global insight_runner
@@ -1291,6 +1457,8 @@ def serve(port=8765, open_browser=True):
     classify_runner = classify.Runner()
     global dy_runner
     dy_runner = douyin_actions.Runner(worker.log)
+    # 点赞/评论要用的浏览器 = 后台那一个（同一个登录态），没起来就让 worker 拉起来
+    douyin_actions.START_BROWSER = lambda: worker.submit("dy_browser")
     srv = None
     for p in range(port, port + 20):
         try:
@@ -1301,7 +1469,6 @@ def serve(port=8765, open_browser=True):
             continue
     if srv is None:
         raise SystemExit("找不到可用端口")
-    import threading
     threading.Thread(target=_quit_watchdog, args=(srv,), daemon=True, name="quit-watch").start()
     # 先把服务跑起来再开窗口，否则窗口可能先于服务加载，看到的是「无法访问」
     threading.Thread(target=srv.serve_forever, daemon=True, name="http").start()

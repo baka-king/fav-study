@@ -178,101 +178,171 @@ def _fetch_range(url, referer, start, stop, fh, counter, lock, item_id, total):
                     update(item_id, counter[0], total)
 
 
-def _rank_urls(urls, referer):
-    """多条线路先各试下前 700KB，优先用快的（抖音不同 CDN 速度差很多）。"""
-    if len(urls) < 2:
-        return urls
-    scored = []
-    for i, u in enumerate(urls[:5]):
+def _probe(url, referer):
+    """返回 (是否支持分段, 文件大小)。"""
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer,
+                                               "Range": "bytes=0-0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        cr = r.headers.get("Content-Range") or ""
+        if "/" in cr:
+            try:
+                return True, int(cr.rsplit("/", 1)[1])
+            except ValueError:
+                pass
+        return False, int(r.headers.get("Content-Length") or 0)
+
+
+def _fetch_range(url, referer, start, stop, path, counter, lock, item_id, total,
+                 tries=2, stall=None):
+    last = None
+    for _ in range(tries):
         try:
-            req = urllib.request.Request(u, headers={"User-Agent": UA, "Referer": referer,
-                                                      "Range": "bytes=0-716800"})
-            t0 = time.time()
-            with urllib.request.urlopen(req, timeout=8) as r:
-                n = len(r.read())
-            dt = max(0.001, time.time() - t0)
-            scored.append((n / dt, i, u))
-        except Exception:
-            scored.append((0.0, i, u))
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return [u for _, _, u in scored]
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer,
+                                                       "Range": f"bytes={start}-{stop}"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                fh = open(path, "r+b")
+                try:
+                    pos = start
+                    while True:
+                        chunk = r.read(256 * 1024)
+                        if not chunk:
+                            break
+                        fh.seek(pos)
+                        fh.write(chunk)
+                        pos += len(chunk)
+                        if stall is not None and stall.get("dead"):
+                            raise RuntimeError("stalled")
+                        with lock:
+                            counter[0] += len(chunk)
+                            if stall is not None:
+                                stall["last"] = time.time()
+                            if item_id is not None:
+                                update(item_id, counter[0], total)
+                finally:
+                    fh.close()
+            return True
+        except Exception as e:
+            last = e
+    return False
 
 
 def download(urls, dest: Path, item_id=None, title="", referer="https://www.douyin.com/",
-             parts=4):
-    """下载到 dest：能分段就 4 路并发，速度比单连接快好几倍。"""
+             parts=8):
+    """多线路、多连接分段下载：不同 CDN 地址 + 多线程同时拉，速度比单连接快很多。"""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
+    urls = [u for u in (urls or []) if isinstance(u, str) and u.startswith("http")]
+    if not urls:
+        raise RuntimeError("视频下载失败：没有可用的地址")
     last = "没有可用的视频地址"
-    urls = _rank_urls(list(urls or []), referer)
-    for u in urls:
-        try:
-            if item_id is not None:
-                begin(item_id, title)
-            ok_range, total = _probe(u, referer)
-            if ok_range and total > 8 * 1024 * 1024:
-                n = max(1, min(parts, (total // (2 * 1024 * 1024)) or 1))
-                step = total // n
-                ranges = []
-                for i in range(n):
-                    a = i * step
-                    b = total - 1 if i == n - 1 else (a + step - 1)
-                    ranges.append((a, b))
-                counter, lock = [0], threading.Lock()
-                with open(part, "wb") as f:
-                    f.truncate(total)
-                errs = []
+    try:
+        if item_id is not None:
+            begin(item_id, title)
 
-                def worker(a, b):
-                    try:
-                        fh = open(part, "r+b")
-                        try:
-                            _fetch_range(u, referer, a, b, fh, counter, lock, item_id, total)
-                        finally:
-                            fh.close()
-                    except Exception as e:
-                        errs.append(e)
-
-                ths = [threading.Thread(target=worker, args=(a, b), daemon=True) for a, b in ranges]
-                for t in ths:
-                    t.start()
-                for t in ths:
-                    t.join()
-                if errs:
-                    raise errs[0]
-                size = part.stat().st_size
-            else:
-                req = urllib.request.Request(u, headers={"User-Agent": UA, "Referer": referer,
-                                                          "Accept": "*/*"})
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    total = int(r.headers.get("Content-Length") or 0)
-                    done = 0
-                    with open(part, "wb") as f:
-                        while True:
-                            chunk = r.read(256 * 1024)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            done += len(chunk)
-                            if item_id is not None:
-                                update(item_id, done, total)
-                    size = done
-            if size < 10 * 1024:
-                last = "下载到的文件太小，可能是错误页"
-                part.unlink(missing_ok=True)
-                continue
-            part.replace(dest)
-            return dest
-        except Exception as e:
-            last = str(e).splitlines()[0][:150]
+        # 先探第一条，拿到总大小
+        ok_range, total = (False, 0)
+        candidates = []
+        for u in urls[:4]:
             try:
-                part.unlink(missing_ok=True)
-            except OSError:
-                pass
-        finally:
-            if item_id is not None:
-                end(item_id)
-    raise RuntimeError(f"视频下载失败：{last}")
+                ok, size = _probe(u, referer)
+                if ok and size > 0:
+                    candidates.append(u)
+                    if not total:
+                        total = size
+            except Exception:
+                continue
+
+        if total > 600 * 1024 * 1024:
+            raise RuntimeError(f"文件太大（{total//1024//1024}MB），跳过缓存，播放时在线看")
+        if total > 6 * 1024 * 1024 and candidates:
+            n = max(1, min(parts, total // (1024 * 1024)))
+            step = total // n
+            with open(part, "wb") as f:
+                f.truncate(total)
+            counter, lock = [0], threading.Lock()
+            stall = {"last": time.time(), "dead": False}
+            fails = []
+
+            def watchdog():
+                while not stop_evt.wait(5):
+                    if time.time() - stall["last"] > 30:
+                        stall["dead"] = True
+                        return
+
+            stop_evt = threading.Event()
+            threading.Thread(target=watchdog, daemon=True).start()
+
+            def worker(i, a, b):
+                u = candidates[i % len(candidates)]
+                if not _fetch_range(u, referer, a, b, part, counter, lock, item_id, total):
+                    fails.append((a, b))
+                    # 换一条线路再试
+                    for alt in candidates:
+                        if alt != u and _fetch_range(alt, referer, a, b, part, counter, lock, item_id, total):
+                            fails.pop()
+                            break
+
+            ths = []
+            for i in range(n):
+                a = i * step
+                b = total - 1 if i == n - 1 else (a + step - 1)
+                t = threading.Thread(target=worker, args=(i, a, b), daemon=True)
+                ths.append(t)
+                t.start()
+            deadline = time.time() + 90
+            for t in ths:
+                while t.is_alive() and time.time() < deadline:
+                    t.join(1)
+                    if stall["dead"]:
+                        break
+                if stall["dead"]:
+                    break
+            stop_evt.set()
+            if stall["dead"]:
+                # 给已阻塞的连接一点时间自己超时退出，再删半截文件
+                end_at = time.time() + 20
+                for t in ths:
+                    t.join(max(0, end_at - time.time()))
+                remove_file(part)
+            if stall["dead"]:
+                raise RuntimeError("下载停滞（CDN 卡住）")
+            if fails:
+                raise RuntimeError(f"{len(fails)} 个分段没下完")
+            size = part.stat().st_size
+        else:
+            # 小文件或不支持分段：单连接
+            done, size = 0, 0
+            with open(part, "wb") as f:
+                for u in urls:
+                    try:
+                        req = urllib.request.Request(u, headers={"User-Agent": UA, "Referer": referer,
+                                                                  "Accept": "*/*"})
+                        with urllib.request.urlopen(req, timeout=20) as r:
+                            total2 = int(r.headers.get("Content-Length") or 0)
+                            f.seek(0)
+                            f.truncate(0)
+                            done = 0
+                            while True:
+                                chunk = r.read(256 * 1024)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                done += len(chunk)
+                                if item_id is not None:
+                                    update(item_id, done, total2)
+                        size = done
+                        break
+                    except Exception as e:
+                        last = str(e).splitlines()[0][:120]
+                        continue
+
+        if size < 10 * 1024:
+            raise RuntimeError("下载到的文件太小，可能是错误页")
+        part.replace(dest)
+        return dest
+    finally:
+        if item_id is not None:
+            end(item_id)
 
 
 # ---------------------------------------------------------------- 全部缓存任务

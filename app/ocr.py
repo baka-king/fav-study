@@ -31,7 +31,10 @@ def backend():
 
 def status():
     b = backend()
-    return {"backend": b, "label": {"vision": "苹果系统文字识别", "rapidocr": "RapidOCR"}.get(b, "未安装")}
+    label = {"vision": "苹果系统文字识别", "rapidocr": "RapidOCR"}.get(b, "未安装")
+    if b == "rapidocr" and gpu_ready():
+        label += "（显卡加速）"
+    return {"backend": b, "label": label}
 
 
 def _vision(path):
@@ -44,11 +47,30 @@ def _vision(path):
     return [t.strip() for t, _ in rows]
 
 
+SUBSET_EP = "DmlExecutionProvider"   # Windows 上的显卡加速
+
+
+def gpu_ready() -> bool:
+    try:
+        import onnxruntime as ort
+        return SUBSET_EP in ort.get_available_providers()
+    except Exception:
+        return False
+
+
+def _engine_kwargs():
+    """有显卡就用 DirectML，识别分辨率同时提高（更快也更准）。"""
+    kw = {"det_limit_side_len": 1280}
+    if gpu_ready():
+        kw.update(det_use_dml=True, cls_use_dml=True, rec_use_dml=True)
+    return kw
+
+
 def _rapid(path):
     global _engine
     from rapidocr_onnxruntime import RapidOCR
     if _engine is None:
-        _engine = RapidOCR()
+        _engine = RapidOCR(**_engine_kwargs())
     result, _ = _engine(str(path))
     lines = []
     for box, text, score in result or []:

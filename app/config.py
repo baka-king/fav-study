@@ -78,7 +78,7 @@ DEFAULT_CATEGORIES = [
     "AI 编程", "AI 绘画与视频", "提示词技巧", "AI 办公效率", "AI 副业与变现",
     "AI 工具推荐", "大模型与行业资讯", "AI 学习方法",
     "摄影与剪辑", "美食与烹饪", "健身与健康", "穿搭与美妆",
-    "学习与成长", "商业与创业", "生活与娱乐", "其他",
+    "学习与成长", "商业与创业", "生活与娱乐", "无法分类",
 ]
 
 # 老版本的分类只有 AI 那 9 个，导致摄影/美食/健身的笔记全被塞进「其他」
@@ -123,6 +123,18 @@ DEFAULTS = {
     "deep_api_key": "",
     "deep_prompt": DEFAULT_DEEP_PROMPT,
     "deep_chunk_chars": 12000,          # 文稿超过这个字数就分段总结再合并
+    # ---- 备用模型：主模型超时/报错时自动切过去，避免整批任务卡死
+    "asr_auto": True,                  # 按视频长短自动挑语音模型（短视频用更准的）
+    "auto_sync": True,                 # 自动同步收藏（每 N 分钟）
+    "auto_sync_min": 10,               # 多久同步一次（分钟）
+    "auto_process": True,              # 有新条目就自动开始拆解
+    "auto_sync_at": "",                # 可选：每天固定时间再跑一次
+    "parallel": 4,                     # 同时让几个模型一起提炼（只在 AI 那一步并行）
+    "fb_on": False,
+    "fb_provider": "deepseek",
+    "fb_base_url": PROVIDERS["deepseek"]["base_url"],
+    "fb_model": PROVIDERS["deepseek"]["model"],
+    "fb_api_key": "",
     "free_plan": "",                    # 正在用的免费方案（空 = 没用）
     "welcome_done": False,
     "tokens_used": 0,
@@ -193,7 +205,7 @@ def add_tokens(n: int):
 def public(s: dict) -> dict:
     """给网页看的设置：Key 只露出末尾 4 位。"""
     out = dict(s)
-    for field in ("api_key", "deep_api_key"):
+    for field in ("api_key", "deep_api_key", "fb_api_key"):
         k = out.pop(field, "") or ""
         out[field + "_set"] = bool(k)
         out[field + "_hint"] = ("••••" + k[-4:]) if len(k) >= 4 else ""
@@ -218,6 +230,13 @@ def llm_cfg(s, purpose="main"):
         cfg = {"provider": s.get("provider"), "base_url": s.get("base_url"),
                "model": s.get("model"), "api_key": s.get("api_key")}
     cfg["kind"] = provider_kind(cfg["provider"], cfg["base_url"])
+    # 备用模型：只有勾选并且填全了才带上
+    if s.get("fb_on") and (s.get("fb_model") or "").strip():
+        fb = {"provider": s.get("fb_provider"), "base_url": s.get("fb_base_url"),
+              "model": s.get("fb_model"), "api_key": s.get("fb_api_key")}
+        if (fb["api_key"] or "").strip() and (fb["base_url"] or "").strip():
+            fb["kind"] = provider_kind(fb["provider"], fb["base_url"])
+            cfg["fallback"] = fb
     return cfg
 
 

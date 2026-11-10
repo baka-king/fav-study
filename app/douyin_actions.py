@@ -23,6 +23,18 @@ KIND_LABEL = {"like": "点赞", "collect": "收藏", "uncollect": "取消收藏"
 class ActionError(Exception):
     pass
 
+# 由 server 启动时注入：让后台把抖音浏览器跑起来（带 9333 调试端口）
+START_BROWSER = None
+
+
+def _wait_cdp(sec=30):
+    end = time.time() + sec
+    while time.time() < end:
+        if _cdp_alive(0.6):
+            return True
+        time.sleep(0.6)
+    return False
+
 
 def _cdp_alive(timeout=1.2):
     try:
@@ -45,6 +57,14 @@ class Session:
     def __enter__(self):
         from playwright.sync_api import sync_playwright
         self.pw = sync_playwright().start()
+        if not _cdp_alive() and START_BROWSER:
+            # 后台没有浏览器在跑：先让它起来（用同一个登录态），再通过 CDP 接上去。
+            # 直接自己再开一个 persistent context 会跟同一个用户目录打架，必失败。
+            try:
+                START_BROWSER()
+            except Exception:
+                pass
+            _wait_cdp(30)
         if _cdp_alive():
             self.browser = self.pw.chromium.connect_over_cdp(CDP_URL)
             if not self.browser.contexts:
@@ -72,7 +92,8 @@ class Session:
                 return self.ctx
             except Exception as e:
                 errors.append(f"{ch}: {str(e)[:120]}")
-        raise ActionError("打不开浏览器：" + "；".join(errors))
+        raise ActionError("打不开浏览器（后台那个也没起来，可能是登录窗口被关了）。"
+                          "请先点一次「登录抖音」或「同步收藏」，再试。" + "；".join(errors))
 
     def __exit__(self, *exc):
         for fn in (lambda: self.own and self.own.close(),

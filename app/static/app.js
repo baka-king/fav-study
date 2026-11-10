@@ -6,6 +6,9 @@ const view = $("#view");
 
 /* ---------------------------------------------------------------- 线条图标（Lucide 风格，ISC 开源协议） */
 const ICONS = {
+  zap: '<path d="M13 2 4.5 13.5H11l-1 8.5L19.5 10H13z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  arrowUp: '<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>',
   shuffle: '<path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
@@ -48,6 +51,58 @@ function catColor(name) {
   return CAT_PALETTE[h % CAT_PALETTE.length];
 }
 // 抖音图床偶尔会拒掉浏览器直连（签名过期/被拦）：失败一次就走本机代理再试
+/* 本地笔记图片会被修复/替换，带上条目更新时间做版本号，防止浏览器缓存旧图 */
+function coverUrl(it) {
+  const c = (it && it.cover) || "";
+  if (!c) return "";
+  if (c.startsWith("/files/")) {
+    const v = Math.floor((it.updated_at || it.created_at || 0) * 1000);
+    return c + (c.includes("?") ? "&" : "?") + "v=" + v;
+  }
+  // 远端封面走本机代理：小红书的图带签名，过期就 403；抖音图床也会拦跨域
+  if (/^https?:/i.test(c)) return "/api/img?u=" + encodeURIComponent(c);
+  return c;
+}
+window.coverUrl = coverUrl;
+
+/* 粘贴文稿：把一段文字直接变成一条笔记（走同样的精读流程） */
+function openPasteDoc() {
+  if (document.getElementById("pasteModal")) return;
+  const d = document.createElement("div");
+  d.className = "modal"; d.id = "pasteModal";
+  d.innerHTML = `<div class="modal-card" style="width:min(780px,100%)">
+    <div class="modal-head"><h2>粘贴文稿</h2><button class="icon" data-close>✕</button></div>
+    <div class="body" style="padding:0 24px">
+      <div class="field"><label>标题</label><input id="pdTitle" placeholder="给这份文稿起个名字（可不填）"></div>
+      <div class="field" style="margin-top:12px"><label>正文</label>
+        <textarea id="pdText" rows="12" placeholder="把公众号 / 文档 / 聊天记录里的文字粘进来，至少 50 字"></textarea></div>
+    </div>
+    <div class="modal-foot"><span class="muted small">会当成一条收藏，直接进学习库</span><span class="spacer"></span>
+      <button class="btn" data-close>取消</button><button class="btn primary" id="pdOk">保存</button></div>
+  </div>`;
+  document.body.appendChild(d);
+  const close = () => d.remove();
+  d.querySelectorAll("[data-close]").forEach((b) => b.onclick = close);
+  d.onclick = (e) => { if (e.target === d) close(); };
+  $("#pdOk").onclick = async () => {
+    const text = $("#pdText").value.trim();
+    if (text.length < 50) return toast("文稿太短了，至少 50 个字");
+    $("#pdOk").disabled = true;
+    try {
+      const r = await api("/api/paste", { text, title: $("#pdTitle").value.trim() });
+      close();
+      toast("已保存，正在生成笔记");
+      await refreshState();
+      if (r && r.id) location.hash = "#/item/" + r.id;
+    } catch (e) {
+      toast(e.message, 5000);
+      $("#pdOk").disabled = false;
+    }
+  };
+  setTimeout(() => $("#pdText").focus(), 60);
+}
+window.openPasteDoc = openPasteDoc;
+
 function imgFallback(el) {
   if (el.dataset.fb) { el.remove(); return; }
   el.dataset.fb = "1";
@@ -60,13 +115,42 @@ const catChip = (name, extra = "") => `<span class="chip cat cat-${catColor(name
 const STATUS = {
   queued: ["排队中", "gray"], fetching: ["读取信息", "teal"], downloading: ["下载中", "teal"],
   transcribing: ["转文字中", "teal"], extracting: ["AI 提炼中", "teal"], done: ["已完成", "teal"],
+  retry_wait: ["等待重试", "warn"],
   need_key: ["待提炼", "warn"], irrelevant: ["主题无关", "gray"], skipped: ["已跳过", "gray"], failed: ["失败", "bad"],
 };
-const ACTIVE = ["queued", "fetching", "downloading", "transcribing", "extracting"];
+const ACTIVE = ["queued", "retry_wait", "fetching", "downloading", "transcribing", "extracting"];
+/* 已完成列表排序：desc = 最新完成在前（默认），asc = 最早完成在前 */
+let doneSort = localStorage.getItem("doneSort") || "desc";
+
+/* ---------------------------------------------------------------- 外观主题 */
+function applyTheme(name) {
+  const root = document.documentElement;
+  if (!name || name === "auto") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", name);
+  try { localStorage.setItem("theme", name || "auto"); } catch (e) {}
+}
+(() => {
+  const q = new URLSearchParams(location.search).get("theme");
+  applyTheme(q || localStorage.getItem("theme") || "auto");
+})();
+/* 侧边栏的小圆钮：循环切换 跟随系统 → 浅色 → 纯白 → 深色 */
+document.addEventListener("DOMContentLoaded", () => {
+  const btn = document.getElementById("themeBtn");
+  if (!btn) return;
+  const order = ["auto", "light", "white", "dark"];
+  btn.onclick = () => {
+    const cur = localStorage.getItem("theme") || "auto";
+    const next = order[(order.indexOf(cur) + 1) % order.length];
+    applyTheme(next);
+    const name = { auto: "跟随系统", light: "浅色", white: "纯白", dark: "深色" }[next];
+    if (window.toast) toast("外观：" + name);
+  };
+});
 
 let STATE = null;
 let libFilter = { q: "", learned: "", starred: "", category: "" };
-let favFilter = { q: "", category: "", sub: "", dur: "", stage: "", sort: "new", platform: "" };
+let favFilter = { q: "", category: "", sub: "", dur: "", stage: "", sort: "new", platform: "", since: "", scope: "" };
+let favView = localStorage.getItem("favView") || "grid";   // grid | list
 let wasClassifyBusy = false;
 let favItems = [];
 
@@ -107,8 +191,19 @@ async function stepItem(dir) {
   else location.hash = `#/item/${it.id}`;
 }
 
+function warmNeighbors(currentId) {
+  const list = navListNow();
+  const i = list.findIndex((x) => x.id === currentId);
+  if (i < 0) return;
+  [list[i + 1], list[i - 1]].forEach((it) => {
+    if (!it || !it.aweme_id || (it.platform || "douyin") === "xhs") return;
+    fetch(`/api/items/${it.id}/warm`).catch(() => {});
+  });
+}
+
 function openPlayer(id, title = "", aweme = "") {
   dyItem = id;
+  warmNeighbors(id);
   $("#playTitle").textContent = (title || "原视频").slice(0, 60);
   $("#playModal").hidden = false;
   switchToProxy(id);
@@ -204,8 +299,8 @@ async function dyAct(action, text = "") {
 document.addEventListener("click", (e) => {
   const b = e.target.closest && e.target.closest("[data-play]");
   if (b) { e.preventDefault(); e.stopPropagation(); openPlayer(+b.dataset.play, b.dataset.title || "", b.dataset.aweme || ""); return; }
-  const nv = e.target.closest && e.target.closest("[data-nav]");
-  if (nv) { e.preventDefault(); e.stopPropagation(); stepItem(nv.dataset.nav === "prev" ? -1 : 1); return; }
+  const nv = e.target.closest && e.target.closest(".pm-nav[data-step]");
+  if (nv) { e.preventDefault(); e.stopPropagation(); stepItem(nv.dataset.step === "prev" ? -1 : 1); return; }
   const c = e.target.closest && e.target.closest("#playModal [data-close], #cmtModal [data-close]");
   if (c) { closeDyModals(); }
   const d = e.target.closest && e.target.closest("#dupModal [data-close]");
@@ -268,6 +363,7 @@ function applyFavFold() {
   if (b) {
     b.classList.toggle("up", favFolded());
     b.title = favFolded() ? "展开分类" : "折叠分类";
+    b.textContent = favFolded() ? "展开分类 ▸" : "折叠分类 ▾";
   }
 }
 
@@ -275,6 +371,23 @@ function renderSideCats(st) {
   const favBox = $("#navCatsFav");
   if (!favBox) return;
   const pf = favFilter.platform || "";
+  const sig = JSON.stringify([pf, favFilter.category, favFilter.sub, st.total,
+    st.by_platform || {}, st.all_categories || [], (st.platform_categories || {})[pf] || []]);
+  const ncache = $("#navCacheN");
+  if (ncache && STATE) {
+    const cc = STATE.cache || {};
+    const n = (cc.all && cc.all.on) ? (cc.all.total - cc.all.done) : (cc.active || 0);
+    ncache.hidden = !n;
+    ncache.textContent = n || "";
+  }
+  const dn = $("#navDupsN");
+  if (dn) {
+    const n = STATE.dups_n || 0;
+    dn.hidden = !n;
+    dn.textContent = n;
+  }
+  if (sig === window.__sideSig) { applyFavFold(); return; }
+  window.__sideSig = sig;
   const cats = pf ? ((st.platform_categories || {})[pf] || []) : (st.all_categories || []);
   const total = pf ? (((st.by_platform || {})[pf]) || 0) : (st.total || 0);
   const pfx = pf ? `p/${pf}/` : "";
@@ -296,23 +409,13 @@ function renderSideCats(st) {
   }
   favBox.innerHTML = out.join("");
   applyFavFold();
-  const ncache = $("#navCacheN");
-  if (ncache && STATE) {
-    const cc = STATE.cache || {};
-    const n = (cc.all && cc.all.on) ? (cc.all.total - cc.all.done) : (cc.active || 0);
-    ncache.hidden = !n;
-    ncache.textContent = n || "";
-  }
-  const dn = $("#navDupsN");
-  if (dn) {
-    const n = STATE.dups_n || 0;
-    dn.hidden = !n;
-    dn.textContent = n;
-  }
 }
 
 async function refreshState() {
   try { STATE = await api("/api/state"); } catch { return; }
+  const meta = window.__META || {};
+  if (!STATE.providers) STATE.providers = meta.providers || {};
+  if (!STATE.free_plans) STATE.free_plans = meta.free_plans || {};
   const st = STATE.stats, w = STATE.worker;
   const queued = ACTIVE.reduce((n, k) => n + (st.by_status[k] || 0), 0);
   const q = $("#navQueue"); q.hidden = !queued; q.textContent = queued;
@@ -349,6 +452,7 @@ async function refreshState() {
 let pollTimer = null;
 let wasDeepBusy = false;
 let lastInsKey = null;
+let lastGridPaint = 0;
 function startPolling() {
   clearTimeout(pollTimer);
   const tick = async () => {
@@ -358,8 +462,10 @@ function startPolling() {
     await refreshState();
     const r = route();
     if (r.name === "process") renderProcessLive();
-    else if (r.name === "library" && JSON.stringify(STATE?.stats) !== before) renderLibrary(true);
-    else if (r.name === "favs" && JSON.stringify(STATE?.stats) !== before) renderFavs(true);
+    else if (r.name === "library" && JSON.stringify(STATE?.stats) !== before
+             && Date.now() - lastGridPaint > 10000) { lastGridPaint = Date.now(); renderLibrary(true); }
+    else if (r.name === "favs" && JSON.stringify(STATE?.stats) !== before
+             && Date.now() - lastGridPaint > 10000) { lastGridPaint = Date.now(); renderFavs(true); }
     else if (r.name === "item" && curItem) {
       const busy = deepBusy(curItem.id);
       if (busy && itemTab === "deep") renderDeepTab($("#tabBody"));
@@ -484,7 +590,7 @@ async function renderLibrary(soft = false) {
   const items = await api("/api/items?" + params);
   lastItems = items;
 
-  if (soft && $("#libGrid")) { $("#libGrid").innerHTML = gridHtml(items); bindQuick($("#libGrid")); updateProgress(st, doneN, pct); return; }
+  if (soft && $("#libGrid")) { paintGrid($("#libGrid"), items, gridHtml); updateProgress(st, doneN, pct); return; }
 
   view.innerHTML = `
     ${bannerHtml()}
@@ -506,9 +612,9 @@ async function renderLibrary(soft = false) {
       </div>
       <button class="btn" id="pdfAll" title="把当前列表里的笔记合并导出成一个 PDF">导出 PDF</button>
     </div>
-    <div class="grid" id="libGrid">${gridHtml(items)}</div>`;
+    <div class="grid" id="libGrid"></div>`;
+  paintGrid($("#libGrid"), items, gridHtml);
   updateProgress(st, doneN, pct);
-  bindQuick(view);
 
   let t; $("#q").addEventListener("input", (e) => { clearTimeout(t); t = setTimeout(() => { libFilter.q = e.target.value.trim(); renderLibrary(true); }, 250); });
   $$("#segLearned button").forEach((b) => b.onclick = () => {
@@ -537,6 +643,36 @@ function updateProgress(st, doneN, pct) {
       <div class="bar" style="margin-top:8px"><i style="width:${pct}%"></i></div></div>`;
 }
 
+/* 列表分批渲染 + 滚到接近底部再加载下一批，几百张卡片也不会卡住首屏 */
+const GRID_CHUNK = 60;
+let gridMore = null;
+
+function paintGrid(el, items, build) {
+  if (!el) return;
+  el.innerHTML = build(items.slice(0, GRID_CHUNK));
+  bindQuick(el);
+  let i = GRID_CHUNK;
+  gridMore = () => {
+    if (!el.isConnected || i >= items.length) { gridMore = null; return; }
+    const mark = document.createElement("div");
+    el.appendChild(mark);
+    el.insertAdjacentHTML("beforeend", build(items.slice(i, i + GRID_CHUNK)));
+    mark.remove();
+    i += GRID_CHUNK;
+    bindQuick(el);
+  };
+  // 内容不够一屏时自动补几批
+  setTimeout(() => {
+    let guard = 0;
+    while (gridMore && document.body.scrollHeight <= innerHeight + 200 && guard++ < 4) gridMore();
+  }, 30);
+}
+
+window.addEventListener("scroll", () => {
+  if (!gridMore) return;
+  if (innerHeight + window.scrollY >= document.body.scrollHeight - 900) gridMore();
+}, { passive: true });
+
 function gridHtml(items) {
   if (!items.length) {
     const any = STATE.stats.total;
@@ -548,7 +684,7 @@ function gridHtml(items) {
   }
   return items.map((it, i) => `
     <a class="vcard" data-id="${it.id}" href="#/item/${it.id}" style="--i:${Math.min(i, 14)}">
-      <div class="cover">${it.cover ? `<img src="${esc(it.cover)}" referrerpolicy="no-referrer" loading="lazy" onerror="window.imgFallback(this)">` : ""}
+      <div class="cover">${it.cover ? `<img src="${esc(coverUrl(it))}" referrerpolicy="no-referrer" loading="lazy" onerror="window.imgFallback(this)">` : ""}
         <div class="ph cat-${catColor(it.category)}" ${it.cover ? 'style="z-index:-1"' : ""}>${ico(it.media_type === "note" ? "file" : "play", "ic ph-ic")}</div>
         ${it.learned ? `<span class="learned-tag">${ico("check", "ic sm")}已学</span>` : ""}
         ${it.duration ? `<span class="dur">${fmtDur(it.duration)}</span>` : ""}${quickActs(it)}</div>
@@ -562,6 +698,23 @@ function gridHtml(items) {
           ${it.has_deep ? `<span class="chip teal">${ico("cap", "ic sm")}已精读</span>` : ""}
           <span class="spacer"></span><span class="a" title="${esc(it.author || "")}">${esc(it.author || "")}</span></div>
       </div></a>`).join("");
+}
+
+/* 列表视图：一行一条，967 条时更好扫 */
+function listHtml(items) {
+  if (!items.length) return gridHtml(items);
+  return items.map((it) => `
+    <a class="lrow" data-id="${it.id}" href="#/item/${it.id}">
+      <span class="thumb">${it.cover ? `<img src="${esc(coverUrl(it))}" referrerpolicy="no-referrer" loading="lazy" onerror="this.remove()">` : ""}</span>
+      <span class="mid">
+        <b class="t">${it.starred ? ico("starFill", "ic star-ic") : ""}${esc(it.note_title || it.title)}</b>
+        <span class="s">${esc(it.summary || "")}</span>
+      </span>
+      <span class="right">
+        ${catChip(it.category)}${it.learned ? `<span class="chip teal">已学</span>` : ""}
+        <span class="muted small">${esc(it.author || "")}</span>
+        <span class="muted small">${it.duration ? fmtDur(it.duration) : ""}</span>
+      </span></a>`).join("");
 }
 
 /* 卡片右上角的快捷操作：取消收藏 / 一键删除 */
@@ -600,7 +753,7 @@ function showCtxMenu(x, y, id) {
   const menu = $("#ctxMenu");
   menu.innerHTML = `
     <button data-act="open">打开详情</button>
-    ${it.aweme_id && it.media_type !== "note" ? `<button data-act="play">播放原视频</button>` : ""}
+    ${it.aweme_id && it.media_type !== "note" && it.platform !== "bili" ? `<button data-act="play">播放原视频</button>` : ""}
     ${it.url ? `<button data-act="copy">复制原链接</button>` : ""}
     <button data-act="unfav" class="danger">取消收藏并删除（清缓存 · 进回收站）</button>`;
   menu.hidden = false;
@@ -657,7 +810,7 @@ async function renderTrash() {
       <div class="card" style="padding:6px 20px">
         ${items.map((it) => `
           <div class="trash-row">
-            ${it.cover ? `<img class="trash-thumb" src="${esc(it.cover)}" referrerpolicy="no-referrer" onerror="this.removeAttribute('src')">` : `<div class="trash-thumb"></div>`}
+            ${it.cover ? `<img class="trash-thumb" src="${esc(coverUrl(it))}" referrerpolicy="no-referrer" onerror="this.removeAttribute('src')">` : `<div class="trash-thumb"></div>`}
             <div class="trash-meta">
               <div class="trash-t">${esc((it.title || "（无标题）").slice(0, 90))}</div>
               <div class="muted small">${esc(it.author || "")}${it.duration ? " · " + fmtDur(it.duration) : ""}${it.category ? " · " + esc(it.category) : ""} · 删于 ${fmtDay(it.deleted_at)}</div>
@@ -743,8 +896,39 @@ const fmtDay = (t) => {
   const md = `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   return d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}-${md}`;
 };
-const timeLabel = (it) => it.collected_at ? `收藏 ${fmtDay(it.collected_at)}`
-  : it.published_at ? `发布 ${fmtDay(it.published_at)}` : "";
+/* 完成时间：今天只显示时:分，昨天/更早带日期 */
+const fmtDayTime = (t) => {
+  if (!t) return "";
+  const d = new Date(t * 1000), now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const sameDay = d.toDateString() === now.toDateString();
+  const yst = new Date(now.getTime() - 86400000);
+  if (sameDay) return hm;
+  if (d.toDateString() === yst.toDateString()) return `昨天 ${hm}`;
+  return `${fmtDay(t)} ${hm}`;
+};
+/* 时间筛选：按「什么时候收藏/入库」算（抖音列表不带收藏时间，用入库时间兜底） */
+function sinceOf(v) {
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+  if (v === "today") return startOfDay;
+  if (v === "3d") return startOfDay - 2 * 86400;
+  if (v === "7d") return startOfDay - 6 * 86400;
+  return 0;
+}
+
+const timeLabel = (it) => {
+  if (it.collected_at) return `收藏 ${fmtDay(it.collected_at)}`;
+  // 抖音收藏列表不带收藏时间，就用「什么时候进到库里」当依据，别让用户以为这是旧视频
+  const added = it.created_at || 0;
+  if (added) {
+    const days = Math.floor((Date.now() / 1000 - added) / 86400);
+    if (days <= 0) return "今天加入";
+    if (days === 1) return "昨天加入";
+    if (days <= 7) return `${days} 天前加入`;
+  }
+  return it.published_at ? `发布 ${fmtDay(it.published_at)}` : "";
+};
 
 function favGrid(items) {
   if (!items.length) return emptyHtml("search", "这个筛选下没有收藏", "换一个分类或时长看看。");
@@ -754,10 +938,10 @@ function favGrid(items) {
     const ready = it.status === "done";
     return `
     <a class="vcard" data-id="${it.id}" href="#/item/${it.id}" style="--i:${Math.min(i, 14)}">
-      <div class="cover">${it.cover ? `<img src="${esc(it.cover)}" referrerpolicy="no-referrer" loading="lazy" onerror="window.imgFallback(this)">` : ""}
+      <div class="cover">${it.cover ? `<img src="${esc(coverUrl(it))}" referrerpolicy="no-referrer" loading="lazy" onerror="window.imgFallback(this)">` : ""}
         <div class="ph cat-${catColor(it.category)}" ${it.cover ? 'style="z-index:-1"' : ""}>${ico(it.media_type === "note" ? "file" : "play", "ic ph-ic")}</div>
         <span class="dur">${it.duration ? fmtDur(it.duration) : (it.media_type === "note" ? "图文" : "—")}</span>
-        ${it.media_type !== "note" && it.aweme_id ? `<button class="play-ovr" data-play="${it.id}" data-aweme="${esc(it.aweme_id || "")}" data-title="${esc(it.note_title || it.title || "")}" title="播放原视频">${ico("play", "ic sm")}</button>` : ""}
+        ${it.media_type !== "note" && it.aweme_id && it.platform !== "bili" ? `<button class="play-ovr" data-play="${it.id}" data-aweme="${esc(it.aweme_id || "")}" data-title="${esc(it.note_title || it.title || "")}" title="播放原视频">${ico("play", "ic sm")}</button>` : ""}
         ${ready ? (it.learned ? `<span class="learned-tag">${ico("check", "ic sm")}已学</span>` : "")
           : `<span class="learned-tag">${esc(stText)}</span>`}${quickActs(it)}</div>
       <div class="body">
@@ -784,6 +968,9 @@ async function renderFavs(soft = false) {
   if (favFilter.sub) params.set("sub", favFilter.sub);
   if (favFilter.dur) params.set("dur", favFilter.dur);
   if (favFilter.stage) params.set("stage", favFilter.stage);
+  if (favFilter.scope) params.set("scope", favFilter.scope);
+  const sinceTs = sinceOf(favFilter.since);
+  if (sinceTs) params.set("since", String(sinceTs));
   if (favFilter.platform) params.set("platform", favFilter.platform);
   if (!soft && !$("#favGrid")) view.innerHTML = skeletonLibrary();
   const items = await api("/api/items?" + params);
@@ -804,8 +991,7 @@ async function renderFavs(soft = false) {
     <div class="stat"><b>${sc.classified}</b><span>已分类${sc.total - sc.classified > 0 ? `（还有 ${sc.total - sc.classified} 条没分）` : " · 全部搞定"}</span></div>`;
 
   if (soft && $("#favGrid")) {
-    $("#favGrid").innerHTML = favGrid(items);
-    bindQuick($("#favGrid"));
+    paintGrid($("#favGrid"), items, favView === "list" ? listHtml : favGrid);
     $("#favStats").innerHTML = statHtml;
     $("#favCount").textContent = `${items.length} 条`;
     $$("#segStage button").forEach((b) => {
@@ -820,7 +1006,7 @@ async function renderFavs(soft = false) {
     ${bannerHtml()}
     <div class="head">
       <div><h1>${favFilter.category ? `<i class="dot big-dot cat-${catColor(favFilter.category)}"></i>${esc(favFilter.category)}${favFilter.sub ? ` <span class="muted" style="font-size:22px">› ${esc(favFilter.sub)}</span>` : ""}` : (favFilter.platform === "xhs" ? "小红书" : favFilter.platform === "douyin" ? "抖音" : "汇总")}</h1>
-        <div class="muted">${favFilter.category ? `<a href="#/favs${favFilter.platform ? "/p/" + favFilter.platform : ""}">← 全部分类</a>${favFilter.sub ? ` · <a href="#/favs${favFilter.platform ? "/p/" + favFilter.platform : ""}/cat/${encodeURIComponent(favFilter.category)}">看「${esc(favFilter.category)}」全部</a>` : ""}` : (favFilter.platform === "xhs" ? "只看小红书的收藏：分类、时长、拆解进度都只算小红书" : favFilter.platform === "douyin" ? "只看抖音的收藏：分类、时长、拆解进度都只算抖音" : "抖音 + 小红书全部收藏的总览：两个平台的内容都在这儿")}</div></div>
+        <div class="muted">${favFilter.category ? `<a href="#/favs${favFilter.platform ? "/p/" + favFilter.platform : ""}">← 全部分类</a>${favFilter.sub ? ` · <a href="#/favs${favFilter.platform ? "/p/" + favFilter.platform : ""}/cat/${encodeURIComponent(favFilter.category)}">看「${esc(favFilter.category)}」全部</a>` : ""}` : (favFilter.platform === "xhs" ? "只看小红书的收藏：分类、时长、拆解进度都只算小红书" : favFilter.platform === "douyin" ? "只看抖音的收藏：分类、时长、拆解进度都只算抖音" : (favFilter.platform === "bili" ? "只看 B 站的收藏：只解析你手动粘贴的那些，不做自动同步" : "抖音 + 小红书 + B站 全部收藏的总览：三个平台的内容都在这儿"))}</div></div>
       <div class="spacer"></div>
       <button class="btn" id="favDup" title="看看有没有重复收藏">${ico("search")}查重</button>
       <button class="btn" id="favRule" title="只看标题和话题标签，不花钱、不用 AI，几百条也是秒出">${ico("shuffle")}按标题分类</button>
@@ -830,16 +1016,32 @@ async function renderFavs(soft = false) {
     <div class="card fav-stat" id="favStats">${statHtml}</div>
     <div class="toolbar">
       <input class="search" id="q" placeholder="搜索标题、作者…" value="${esc(favFilter.q)}">
+      <select class="sortsel" id="favScope" title="搜哪里">
+        <option value="" ${!favFilter.scope ? "selected" : ""}>全文搜</option>
+        <option value="title" ${favFilter.scope === "title" ? "selected" : ""}>只搜标题</option>
+        <option value="author" ${favFilter.scope === "author" ? "selected" : ""}>只搜作者</option>
+        <option value="body" ${favFilter.scope === "body" ? "selected" : ""}>只搜笔记正文</option>
+      </select>
+      <div class="seg seg-view" id="segView">
+        <button data-v="grid" class="${favView === "grid" ? "on" : ""}">网格</button>
+        <button data-v="list" class="${favView === "list" ? "on" : ""}">列表</button>
+      </div>
       <div class="seg seg-stage" id="segStage">
         ${[["", "全部"], ["done", "已拆解"], ["todo", "未拆解"]]
         .map(([v, l]) => `<button data-v="${v}" class="${favFilter.stage === v ? "on" : ""}">${l}<span class="n">${v === "done" ? nDone : v === "todo" ? nTodo : sc.total}</span></button>`).join("")}
+      </div>
+      <div class="seg" id="segSince">
+        ${[["", "全部时间"], ["today", "今天加的"], ["3d", "近三天"], ["7d", "近一周"]]
+        .map(([v, l]) => `<button data-v="${v}" class="${favFilter.since === v ? "on" : ""}">${l}</button>`).join("")}
       </div>
       <div class="seg" id="segDur">
         ${[["", "全部时长"], ["s", "≤1 分"], ["m", "1-5 分"], ["l", "5-15 分"], ["xl", "15 分以上"]]
         .map(([v, l]) => `<button data-v="${v}" class="${favFilter.dur === v ? "on" : ""}">${l}</button>`).join("")}
       </div>
       <select class="sortsel" id="favSort">
-        <option value="new" ${favFilter.sort === "new" ? "selected" : ""}>最新收藏</option>
+        <option value="new" ${favFilter.sort === "new" ? "selected" : ""}>最新入库（推荐）</option>
+        <option value="time_desc" ${favFilter.sort === "time_desc" ? "selected" : ""}>发布时间新→旧</option>
+        <option value="done" ${favFilter.sort === "done" ? "selected" : ""}>最近处理完的</option>
         <option value="time_desc" ${favFilter.sort === "time_desc" ? "selected" : ""}>时间从新到旧</option>
         <option value="time_asc" ${favFilter.sort === "time_asc" ? "selected" : ""}>时间从旧到新</option>
         <option value="long" ${favFilter.sort === "long" ? "selected" : ""}>时长从长到短</option>
@@ -847,8 +1049,11 @@ async function renderFavs(soft = false) {
       </select>
       <span class="muted small" id="favCount">${items.length} 条</span>
     </div>
-    <div class="grid" id="favGrid">${favGrid(items)}</div>`;
+    <div class="grid" id="favGrid"></div>`;
 
+  const buildFav = favView === "list" ? listHtml : favGrid;
+  $("#favGrid").className = favView === "list" ? "grid as-list" : "grid";
+  paintGrid($("#favGrid"), items, buildFav);
   let t;
   $("#q").addEventListener("input", (e) => {
     clearTimeout(t);
@@ -858,6 +1063,11 @@ async function renderFavs(soft = false) {
       if (ss && ss.value !== favFilter.q) ss.value = favFilter.q;
       renderFavs(true);
     }, 250);
+  });
+  $$("#segSince button").forEach((b) => b.onclick = () => {
+    favFilter.since = b.dataset.v;
+    $$("#segSince button").forEach((x) => x.classList.toggle("on", x === b));
+    renderFavs(true);
   });
   $$("#segDur button").forEach((b) => b.onclick = () => {
     favFilter.dur = b.dataset.v;
@@ -870,6 +1080,12 @@ async function renderFavs(soft = false) {
     renderFavs(true);
   });
   $("#favSort").onchange = (e) => { favFilter.sort = e.target.value; renderFavs(true); };
+  $("#favScope") && ($("#favScope").onchange = (e) => { favFilter.scope = e.target.value; renderFavs(true); });
+  $$("#segView button").forEach((b) => b.onclick = () => {
+    favView = b.dataset.v;
+    try { localStorage.setItem("favView", favView); } catch (e) {}
+    renderFavs();
+  });
   bindQuick(view);
   $("#favDup").onclick = () => { location.hash = "#/dups"; };
   $("#favRule").onclick = async () => {
@@ -897,7 +1113,7 @@ function dupCard(it, groupKey) {
     .filter(Boolean).join(" · ");
   return `<label class="dupr">
     <input type="radio" name="dup-${groupKey}" value="${it.id}">
-    ${it.cover ? `<img class="dupi" src="${esc(it.cover)}" referrerpolicy="no-referrer" loading="lazy">`
+    ${it.cover ? `<img class="dupi" src="${esc(coverUrl(it))}" referrerpolicy="no-referrer" loading="lazy">`
       : `<span class="dupi empty">${ico("file", "ic sm")}</span>`}
     <span class="dupc">
       <b>${esc(title)}</b>
@@ -1063,6 +1279,37 @@ function deepBusy(id) {
   return d.item_id === id || (d.pending || []).includes(id);
 }
 
+/* 优先处理之后盯着这一条，处理完自动把页面刷新成笔记 */
+let itemWatchTimer = null;
+function watchItem(id) {
+  if (itemWatchTimer) clearInterval(itemWatchTimer);
+  const started = Date.now();
+  itemWatchTimer = setInterval(async () => {
+    if (Date.now() - started > 30 * 60 * 1000) { clearInterval(itemWatchTimer); return; }
+    let cur;
+    try { cur = await api("/api/items/" + id); } catch { return; }
+    if (!cur || !cur.id) return;
+    const live = document.getElementById("itemLiveMsg");
+    if (live) live.textContent = cur.reason || (STATE.worker && STATE.worker.item_id === id ? (STATE.worker.stage || "") : "");
+    if (["fetching", "downloading", "transcribing", "extracting"].includes(cur.status) && !document.getElementById("itemLive")) {
+      clearInterval(itemWatchTimer); itemWatchTimer = null; renderItem(id); return;
+    }
+    if (cur.status === "done") {
+      clearInterval(itemWatchTimer); itemWatchTimer = null;
+      toast("处理完了，笔记已经出来");
+      renderItem(id);
+    } else if (["failed", "skipped", "irrelevant"].includes(cur.status)) {
+      clearInterval(itemWatchTimer); itemWatchTimer = null;
+      const msg = cur.status === "irrelevant"
+        ? "处理完了，但 AI 判断它和你的关注主题无关，已收进「主题无关」（觉得有用可以点开收回）"
+        : (cur.reason || "这条没能处理成功");
+      toast(msg, 7000);
+      renderItem(id);
+    }
+  }, 3000);
+}
+window.watchItem = watchItem;
+
 async function renderItem(id, tab) {
   let it;
   if (curItem?.id !== id) view.innerHTML = skeletonItem();
@@ -1076,17 +1323,17 @@ async function renderItem(id, tab) {
   const [stText, stCls] = STATUS[it.status] || [it.status, "gray"];
   const isNote = it.media_type === "note";
   const tabs = [["note", "笔记"], ["deep", "带我精读" + (it.deep ? " ✓" : "")], ["text", isNote ? "原图与文字" : "文字稿"]];
-  if (it.aweme_id && !isNote && it.platform !== "xhs") tabs.push(["cmt", "评论"]);
+  if (it.aweme_id && !isNote && !["xhs", "bili"].includes(it.platform)) tabs.push(["cmt", "评论"]);
   view.innerHTML = `
     <a class="back" href="javascript:history.length>1?history.back():location.hash='#/favs'">← 返回</a>
     <div class="watch">
-      <div class="watch-main${it.aweme_id && !isNote ? " has-video" : ""}" id="watchMain">
-        ${it.aweme_id && !isNote
+      <div class="watch-main${it.aweme_id && !isNote && it.platform !== "bili" ? " has-video" : ""}" id="watchMain">
+        ${it.aweme_id && !isNote && it.platform !== "bili"
           ? `<video id="watchVideo" class="watch-video" controls playsinline preload="none"
-               ${it.cover ? `poster="${esc(it.cover)}"` : ""} src="/api/items/${it.id}/video"></video>
+               ${it.cover ? `poster="${esc(coverUrl(it))}"` : ""} src="/api/items/${it.id}/video"></video>
              <button class="watch-play" id="watchPlay">${ico("play", "ic")}<span>播放原视频</span></button>
-             <button class="pm-nav prev" id="watchPrev" data-nav="prev" title="上一个（↑）">‹</button>
-             <button class="pm-nav next" id="watchNext" data-nav="next" title="下一个（↓）">›</button>
+             <button class="pm-nav prev" id="watchPrev" data-step="prev" title="上一个（↑）">‹</button>
+             <button class="pm-nav next" id="watchNext" data-step="next" title="下一个（↓）">›</button>
              <div class="watch-err" id="watchErr" hidden>
                <b>视频没拉下来</b>
                <span>抖音那边可能限流或这条已失效，点重试；想看原界面就去抖音。</span>
@@ -1097,7 +1344,7 @@ async function renderItem(id, tab) {
              </div>
 `
           : (it.cover
-              ? `<img src="${esc(it.cover)}" referrerpolicy="no-referrer" onerror="window.imgFallback(this)">`
+              ? `<img src="${esc(coverUrl(it))}" referrerpolicy="no-referrer" onerror="window.imgFallback(this)">`
               : `<div class="watch-empty">${ico(isNote ? "file" : "play", "ic")}</div>`)}
       </div>
       <aside class="watch-side">
@@ -1111,11 +1358,19 @@ async function renderItem(id, tab) {
         <div class="small muted">${it.platform === "xhs" ? "小红书 · " : ""}${esc(it.author || "")}${it.duration ? " · " + fmtDur(it.duration) : ""}${it.published_at ? " · 发布 " + fmtDay(it.published_at) : ""}</div>
         ${it.title && it.title !== n.title && it.source !== "paste" ? `<div class="muted small orig-title" title="点击展开 / 收起">原标题：${esc(it.title)}</div>` : ""}
         ${it.reason ? `<div class="banner warn" style="margin:0">${esc(it.reason)}</div>` : ""}
-        ${it.aweme_id && it.platform !== "xhs" ? `<div class="side-acts">
+        ${it.aweme_id && !["xhs", "bili"].includes(it.platform) ? `<div class="side-acts">
           <button id="dyLike" title="点赞 / 取消点赞">${ico("heart", "ic")}<span>赞</span><b class="dy-n" id="dyLikeN"></b></button>
           <button id="dyCollect" title="收藏 / 取消收藏">${ico("star", "ic")}<span>收藏</span><b class="dy-n" id="dyCollectN"></b></button>
           <button id="dyComment" title="看评论 / 发评论">${ico("message", "ic")}<span>评论</span><b class="dy-n" id="dyCommentN"></b></button>
         </div>` : ""}
+        ${(() => {
+          const busy = ["fetching", "downloading", "transcribing", "extracting"].includes(it.status);
+          if (busy) return `<div class="item-live" id="itemLive"><span class="spinner"></span><b>正在处理这条…</b><span class="muted small" id="itemLiveMsg"></span></div>`;
+          // 已完成 / 已判定无关（笔记其实已经生成，只需「收进学习库」）就不用再插队
+          if (it.status === "done" || it.status === "irrelevant") return "";
+          return `<div class="item-jump"><button class="btn primary" id="jumpBtn">${ico("zap")}优先处理这条</button>
+            <span class="muted small">点了就插到队首，马上开始，处理完这里直接出笔记</span></div>`;
+        })()}
         <div class="side-btns">
           ${it.dsh ? `<button class="btn primary" id="dshCopy">${ico("sparkles")}复制 DSH 指令</button>` : ""}
           ${it.status === "done" ? `<button class="btn ${it.learned ? "" : "accent"}" id="learnBtn">${it.learned ? ico("check") + "已学会（点击取消）" : "标记为已学会"}</button>` : ""}
@@ -1134,7 +1389,7 @@ async function renderItem(id, tab) {
         ${(it.status === "failed" || it.status === "skipped") && !it.transcript ? `<button class="btn sm" id="retryBtn">${it.status === "skipped" ? "还是处理这条" : "重试"}</button>` : ""}
         ${it.status === "done" ? `<div class="field"><label>分类</label><select id="catSel">${cats.map((c) => `<option ${c === (it.category || n.category) ? "selected" : ""}>${esc(c)}</option>`).join("")}${cats.includes(it.category || n.category) || !(it.category || n.category) ? "" : `<option selected>${esc(it.category || n.category)}</option>`}</select></div>` : ""}
         <div class="row" style="gap:8px;align-self:flex-start;flex-wrap:wrap">
-          <button class="btn ghost sm" id="unfavBtn">取消收藏并删除${it.aweme_id && it.platform !== "xhs" ? "（抖音也取消）" : ""}</button>
+          <button class="btn ghost sm" id="unfavBtn">取消收藏并删除${it.aweme_id && !["xhs", "bili"].includes(it.platform) ? "（抖音也取消）" : ""}</button>
           <button class="btn ghost sm" id="delBtn" style="color:var(--bad)">一键删除</button>
         </div>
       </aside>
@@ -1152,6 +1407,7 @@ async function renderItem(id, tab) {
   renderTab();
 
   // 页面顶上的播放器：走本地代理，能拖进度，不会像抖音 iframe 那样白屏
+  warmNeighbors(it.id);
   const wv = $("#watchVideo");
   if (wv) {
     const box = wv.closest(".watch-main");
@@ -1219,11 +1475,24 @@ async function renderItem(id, tab) {
     $$("#itabs button").forEach((x) => x.classList.toggle("on", x.dataset.t === "cmt"));
     renderTab();
   });
-  if (it.aweme_id && !isNote) loadDyStats(it.id);
+  if (it.aweme_id && !isNote && !["xhs", "bili"].includes(it.platform)) loadDyStats(it.id);
   $("#pdfBtn").onclick = () => window.open(`/print?ids=${id}`, "_blank");
   $("#revealBtn") && ($("#revealBtn").onclick = () => api("/api/open", { what: "item", id }).catch((e) => toast(e.message)));
   $("#includeBtn") && ($("#includeBtn").onclick = async () => { await act("include"); toast("已收进学习库"); refreshState(); renderItem(id, itemTab); });
   $("#reBtn") && ($("#reBtn").onclick = async () => { await act("reextract"); toast("已加入队列，稍等片刻"); location.hash = "#/process"; });
+  $("#jumpBtn") && ($("#jumpBtn").onclick = async () => {
+    const b = $("#jumpBtn");
+    b.disabled = true; b.textContent = "正在插队…";
+    try {
+      await api(`/api/items/${it.id}/action`, { action: "jump" });
+      toast("已插到队首，马上处理这条");
+      watchItem(it.id);
+      renderItem(it.id, tab);
+    } catch (e) {
+      toast(e.message, 4000);
+      b.disabled = false; b.innerHTML = "优先处理这条";
+    }
+  });
   $("#retryBtn") && ($("#retryBtn").onclick = async () => { await act("retry"); toast("已重新加入队列"); location.hash = "#/process"; });
   $("#catSel") && ($("#catSel").onchange = async (e) => { await act("category", { value: e.target.value }); toast("分类已修改"); refreshState(); });
   $("#delBtn").onclick = async () => {
@@ -1244,7 +1513,7 @@ function renderTab() {
   if (!el) return;
   el.classList.remove("fade-in"); void el.offsetWidth; el.classList.add("fade-in");
   if (itemTab === "note") {
-    el.innerHTML = (it.images?.length ? galleryHtml(it.images) : "") +
+    el.innerHTML = (it.images?.length ? galleryHtml(it.images, it.updated_at) : "") +
       (it.note ? noteBody(it) + dshHtml(it)
         : `<div class="empty" style="padding:30px">这条还没有笔记。${it.transcript ? "可以直接去「带我精读」。" : ""}</div>`);
     const dc = $("#dshCopy2");
@@ -1329,7 +1598,7 @@ function renderTextTab(el, focusSec) {
         <span class="spacer"></span><button class="btn sm" id="cpTr">复制全部文字</button></div>
       ${intro.trim() ? `<div class="summary" style="margin-bottom:14px;white-space:pre-wrap">${esc(intro.trim())}</div>` : ""}
       <div class="ocr-list">${it.images.map((src, i) => `<div class="ocr-row">
-        <img src="/files/${encodeURI(src)}" data-g="${i}" loading="lazy">
+        <img src="/files/${encodeURI(src)}?v=${Math.floor((it.updated_at || 0) * 1000)}" data-g="${i}" loading="lazy">
         <div class="ocr-text"><div class="muted small">图 ${i + 1}</div>${parts[i + 1] ? esc(parts[i + 1]) : '<span class="muted">（这张图没有识别到文字）</span>'}</div></div>`).join("")}</div>`;
     $("#cpTr").onclick = () => copyText(it.transcript, "文字已复制");
     bindGallery(el, it.images);
@@ -1737,15 +2006,26 @@ async function renderProcess() {
         <div class="row sync-btns"><button class="btn" id="xhsLogin">登录小红书</button><button class="btn primary" id="xhsSync">同步收藏</button></div>
       </div>
     </div>
+    <div class="card sync-card">
+      <div class="sync-intro">
+        <h2>B站 <span class="chip gray" id="biliLoginChip">未登录</span></h2>
+        <p class="muted small">B 站<b>不做自动同步</b>（账号是共用的），只解析你手动粘贴的链接。登录是可选的：公开视频不登录也能解析；登录后能拿到更高清晰度、会员内容。</p>
+      </div>
+      <div class="sync-form">
+        <div class="field"><label>登录后</label><span class="muted small">cookie 存本机 data/bili_cookies.txt，只用于下视频</span></div>
+        <div class="row sync-btns"><button class="btn" id="biliLogin">登录 B 站（扫码）</button><button class="btn" id="biliPaste">粘贴 B 站链接</button></div>
+      </div>
+    </div>
     <div class="card" style="margin-bottom:16px"><div class="row"><b>本地缓存</b>
       <span class="spacer"></span><span class="muted small" id="cacheQuick">看下载进度和已缓存视频</span>
       <a class="btn sm" href="#/cache">打开缓存页</a></div></div>
     <div class="panels">
       <div class="card col-card">
         <h2>粘贴分享链接</h2>
-        <p class="muted small">抖音或小红书都可以：App 里点「分享 → 复制链接」，视频和图文都能识别，一次能贴很多条。</p>
-        <textarea id="pText" rows="5" placeholder="粘贴抖音 / 小红书分享内容……"></textarea>
-        <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn primary" id="pAdd">添加并处理</button></div>
+        <p class="muted small">抖音、小红书、B站 都可以：视频页复制地址粘进来，视频和图文都能识别，一次能贴很多条。</p>
+        <p class="muted small" style="margin-top:-4px">B站是<strong>手动解析</strong>：B站号是共用的，所以不做自动同步，只解析你贴过来的这一条（有官方字幕就用字幕，没有就下音频转文字）。</p>
+        <textarea id="pText" rows="5" placeholder="粘贴抖音 / 小红书 / B站 链接……"></textarea>
+        <div class="row" style="margin-top:12px"><button class="btn" id="pasteDoc" title="把公众号文章、文档里的文字直接变成笔记">${ico("file")}粘贴文稿</button><span class="spacer"></span><button class="btn" id="pAddJump" title="只加进队列，按普通优先级排">只加入队列</button><button class="btn primary" id="pAdd">${ico("zap")}添加并插队</button></div>
       </div>
       <div class="card col-card">
         <h2>导入本地视频</h2>
@@ -1755,11 +2035,14 @@ async function renderProcess() {
         <div class="row" style="margin-top:12px"><span class="spacer"></span><button class="btn" id="inboxOpen">打开收件箱文件夹</button><button class="btn" id="inboxScan">扫描并处理</button></div>
       </div>
     </div>
+    <div class="card today-card-wrap" id="todayCard" style="margin-bottom:16px"></div>
     <div class="card status-card" id="statusCard" style="margin-bottom:20px"></div>
     <div class="card">
       <div class="row" style="margin-bottom:8px"><div class="tabs" id="tabs" style="margin:0"></div>
-        <span class="spacer"></span><button class="btn sm" id="retryFailed" hidden>${ico("shuffle")}全部重试</button></div>
+        <span class="spacer"></span><button class="btn sm" id="doneSort" hidden>${ico("clock")}最新完成在前</button>
+        <button class="btn sm" id="retryFailed" hidden>${ico("shuffle")}全部重试</button></div>
       <div id="irrBar" class="irr-bar" hidden></div>
+      <div id="failGroups" class="fail-groups" hidden></div>
       <div class="qlist" id="qlist"></div>
     </div>
     <div class="row" style="margin-top:22px;margin-bottom:12px"><h2 style="margin:0">运行日志</h2><span class="spacer"></span>
@@ -1774,6 +2057,26 @@ async function renderProcess() {
     const r = await api("/api/retry_failed", {});
     toast(r.n ? `已把 ${r.n} 条失败的重新排队` : "没有失败的条目");
     await refreshState(); renderProcessLive();
+  });
+  (async () => {
+    const chip = $("#biliLoginChip");
+    if (!chip) return;
+    try {
+      const r = await api("/api/bili/status");
+      chip.textContent = r.logged_in ? "已登录" : "未登录（可选）";
+      chip.className = "chip " + (r.logged_in ? "teal" : "gray");
+    } catch (e) {}
+  })();
+  $("#biliLogin") && ($("#biliLogin").onclick = async () => {
+    try {
+      const r = await api("/api/bili/login", {});
+      toast(r.msg || "已打开 B 站登录页，请扫码", 6000);
+    } catch (e) { toast(e.message, 5000); }
+  });
+  $("#biliPaste") && ($("#biliPaste").onclick = () => {
+    const box = $("#pText");
+    if (box) { box.focus(); box.scrollIntoView({ block: "center", behavior: "smooth" }); }
+    toast("把 B 站视频地址粘到上面的「粘贴分享链接」里，点「添加并插队」");
   });
   $("#xhsLogin") && ($("#xhsLogin").onclick = async () => {
     const limit = parseInt(($("#xhsLimit") || {}).value || "50", 10);
@@ -1810,10 +2113,20 @@ async function renderProcess() {
   loadCache();
   clearInterval(window.__cacheTimer);
   window.__cacheTimer = setInterval(() => { if (!$("#cacheCard")) { clearInterval(window.__cacheTimer); return; } loadCache(); }, 1200);
-  $("#pAdd").onclick = async () => {
-    try { const r = await api("/api/links", { text: $("#pText").value }); $("#pText").value = "";
-      toast(r.added ? `新增 ${r.added} 条，开始处理` : "这些链接都已经添加过了"); renderProcessLive(); } catch (e) { toast(e.message, 4000); }
+  const addLinks = async (text, jump) => {
+    const r = await api("/api/links", { text, jump });
+    toast(r.added ? `新增 ${r.added} 条${jump ? "，已插到队首" : "，已加入队列"}` : "这些链接都已经添加过了");
+    return r;
   };
+  $("#pasteDoc") && ($("#pasteDoc").onclick = openPasteDoc);
+  $("#pAdd").onclick = async () => {
+    try { await addLinks($("#pText").value, true); $("#pText").value = ""; renderProcessLive(); }
+    catch (e) { toast(e.message, 4000); }
+  };
+  $("#pAddJump") && ($("#pAddJump").onclick = async () => {
+    try { await addLinks($("#pText").value, false); $("#pText").value = ""; renderProcessLive(); }
+    catch (e) { toast(e.message, 4000); }
+  });
   $("#syncBtn").onclick = async () => {
     await api("/api/sync", { kind: $("#sKind").value });
     toast("开始同步（整份列表都会读完），请留意弹出的浏览器窗口"); renderProcessLive();
@@ -1838,7 +2151,7 @@ async function renderProcess() {
 
 const TABS = [
   ["active", "处理中", ACTIVE], ["failed", "失败", ["failed"]], ["need_key", "待提炼", ["need_key"]],
-  ["irrelevant", "主题无关", ["irrelevant"]], ["skipped", "已跳过", ["skipped"]], ["done", "已完成", ["done"]],
+  ["done", "已完成", ["done"]],
 ];
 
 async function loadCache() {
@@ -1953,15 +2266,43 @@ function openQrWatch() {
   });
 }
 
+async function paintToday() {
+  const box = $("#todayCard");
+  if (!box) return;
+  let t;
+  try { t = await api("/api/today"); } catch { return; }
+  const cats = (t.cats || []).map((c) => `<span class="chip cat">${esc(c.cat)} ${c.n}</span>`).join(" ");
+  box.innerHTML = `<div class="row" style="margin-bottom:6px"><b>今日汇总</b><span class="muted small">每天零点重新统计</span></div>
+    <div class="today-card">
+      <span>今天新增 <b>${t.added}</b> 条</span>
+      <span>拆解完成 <b>${t.done}</b> 条</span>
+      <span>跳过/无关 <b>${t.skipped}</b> 条</span>
+    </div>
+    ${cats ? `<div class="row" style="margin-top:10px;gap:6px;flex-wrap:wrap">${cats}</div>` : ""}`;
+}
+
 async function renderProcessLive() {
+  paintToday();
   paintLoginChips();
   if (!$("#statusCard")) return;
   const w = STATE.worker, st = STATE.stats.by_status;
   const rf = $("#retryFailed"); if (rf) rf.hidden = !((st.failed || 0) > 0);
+  const ds = $("#doneSort");
+  if (ds) {
+    ds.hidden = procTab !== "done";
+    ds.innerHTML = `${ico("clock")}${doneSort === "desc" ? "最新完成在前" : "最早完成在前"}`;
+    ds.onclick = () => {
+      doneSort = doneSort === "desc" ? "asc" : "desc";
+      try { localStorage.setItem("doneSort", doneSort); } catch (e) {}
+      renderProcessLive();
+    };
+  }
   const pg = STATE.progress || {};
   $("#statusCard").innerHTML = w.busy
     ? (pg.item_id ? `<div class="pcard">
-        <div class="row"><div class="spinner"></div><b class="ptitle">${esc(pg.title || "处理中")}</b><span class="spacer"></span><button class="btn sm" id="stopBtn">停止</button></div>
+        <div class="row"><div class="spinner"></div><b class="ptitle">${esc(pg.title || "处理中")}</b><span class="spacer"></span>
+        ${STATE.worker.paused ? `<button class="btn sm primary" id="resumeBtn">继续</button>` : `<button class="btn sm" id="pauseBtn">暂停</button>`}
+        <button class="btn sm" id="stopBtn">停止</button></div>
         <div class="stepper">${["fetching", "downloading", "transcribing", "extracting"].map((k) => {
             const lbl = (pg.is_note ? { fetching: "读取图文", downloading: "下载图片", transcribing: "识别图片文字", extracting: "AI 提炼" }
               : { fetching: "读取信息", downloading: "下载", transcribing: "转文字", extracting: "AI 提炼" })[k];
@@ -1974,6 +2315,7 @@ async function renderProcessLive() {
       </div>`
       : `<div class="spinner"></div><div style="flex:1"><b>${esc(w.stage || "处理中…")}</b>
         <div class="muted small">${w.total ? `本批进度 ${w.done} / ${w.total}` : ""}</div></div>
+        ${w.paused ? `<button class="btn primary" id="resumeBtn">继续处理</button>` : `<button class="btn" id="pauseBtn" ${(st.queued || 0) ? "" : "disabled"}>暂停</button>`}
         <button class="btn" id="stopBtn">停止</button>`)
     : `<div class="idle-ic">${ico("coffee")}</div><div style="flex:1"><b>空闲中</b><div class="muted small">
         ${(st.queued || 0) ? `队列里还有 ${st.queued} 条等待处理` : "添加视频后会自动开始处理"}</div></div>
@@ -1985,6 +2327,25 @@ async function renderProcessLive() {
     toast(`${failed.length} 条已重新排队，开始处理`); await refreshState(); renderProcessLive();
   });
   $("#stopBtn") && ($("#stopBtn").onclick = () => api("/api/stop", {}));
+  $$("#failGroups [data-clean]").forEach((b) => b.onclick = async () => {
+    const ids = (b.dataset.clean || "").split(",").filter(Boolean);
+    if (!confirm(`把这 ${ids.length} 条已删除的内容移进回收站？（可恢复）`)) return;
+    b.disabled = true;
+    try {
+      const r = await api("/api/failures/clean", { ids: ids.map(Number) });
+      toast(`已移入回收站 ${r.n} 条`);
+      await refreshState(); renderProcessLive();
+    } catch (e) { toast(e.message, 4000); b.disabled = false; }
+  });
+  $$("#failGroups [data-g]").forEach((b) => b.onclick = async () => {
+    const ids = (b.dataset.ids || "").split(",").filter(Boolean);
+    b.disabled = true;
+    for (const id of ids) { try { await api(`/api/items/${id}/action`, { action: "retry" }); } catch (e) {} }
+    toast(`已把 ${ids.length} 条放回队列重试`);
+    await refreshState(); renderProcessLive();
+  });
+  $("#pauseBtn") && ($("#pauseBtn").onclick = async () => { await api("/api/pause", {}); toast("已暂停，点「继续」接着跑"); refreshState().then(renderProcessLive); });
+  $("#resumeBtn") && ($("#resumeBtn").onclick = async () => { await api("/api/resume", {}); toast("继续处理"); refreshState().then(renderProcessLive); });
   $("#goBtn") && ($("#goBtn").onclick = async () => { await api("/api/process", {}); refreshState().then(renderProcessLive); });
 
   $("#tabs").innerHTML = TABS.map(([k, label, ss]) => {
@@ -2025,23 +2386,77 @@ async function renderProcessLive() {
   }
 
   const ss = TABS.find((t) => t[0] === procTab)[2];
-  const items = await api("/api/items?status=" + ss.join(","));
+  // 处理中按「插队优先 + 原有优先级」排，已完成按完成时间倒序（最新做完的在最上面）
+  const sortKey = procTab === "active" ? "queue" : (procTab === "done" && doneSort === "asc" ? "done_asc" : "done");
+  const items = await api("/api/items?status=" + ss.join(",") + "&sort=" + sortKey);
+  // 手动添加 / 插队的条目带 queue_prio；同步收藏夹进来的没有 → 用来标「刚添加」
+  const isNew = (it) => !!it.queue_prio;
+  // 失败页：按原因归类，支持一组一组重试
+  const fg = $("#failGroups");
+  if (fg) {
+    if (procTab === "failed" && items.length) {
+      const key = (r) => {
+        r = r || "";
+        if (/余额|402/.test(r)) return "AI 余额不足";
+        if (/超时|Timeout|goto/i.test(r)) return "页面加载超时";
+        if (/播放地址|没有画面|只下到音频/.test(r)) return "视频地址/画面取不到";
+        if (/连不上|网络|URLError/i.test(r)) return "网络连不上";
+        if (/浏览器|context or browser/i.test(r)) return "浏览器中断";
+        if (/no such|找不到|404/i.test(r)) return "内容已被删除";
+        return "其他原因";
+      };
+      const groups = {};
+      items.forEach((it) => { (groups[key(it.reason)] = groups[key(it.reason)] || []).push(it.id); });
+      fg.hidden = false;
+      fg.innerHTML = Object.entries(groups).map(([k, ids]) => {
+        const clean = k === "内容已被删除"
+          ? ` <button class="btn sm ghost" data-clean="${ids.join(",")}">移入回收站</button>` : "";
+        return `<span class="fg"><button class="btn sm" data-g="${k}" data-ids="${ids.join(",")}">${esc(k)} · ${ids.length} 条 · 重试</button>${clean}</span>`;
+      }).join(" ");
+    } else {
+      fg.hidden = true; fg.innerHTML = "";
+    }
+  }
+  let qpos = 0;
   $("#qlist").innerHTML = items.length ? items.slice(0, 300).map((it) => {
     const [label, cls] = STATUS[it.status] || [it.status, "gray"];
     let btns = "";
+    let meta = "";
     if (it.status === "failed") btns = `<button class="btn sm" data-a="retry" data-id="${it.id}">重试</button>`;
     if (it.status === "need_key") btns = `<button class="btn sm" data-a="reextract" data-id="${it.id}">提炼</button>`;
     if (it.status === "irrelevant") btns = `<button class="btn sm" data-a="include" data-id="${it.id}">收进学习库</button>`;
+    if (it.status === "retry_wait") {
+      const due = (STATE.worker.retry_at || {})[String(it.id)] || 0;
+      const left = Math.max(0, Math.round(due - Date.now() / 1000));
+      btns = `<button class="btn sm" data-a="retry" data-id="${it.id}">立即重试</button>`;
+      meta = `<span class="qnum">${left ? left + " 秒后自动重试" : "马上重试"}</span>`;
+    }
+    if (it.status === "queued") {
+      qpos += 1;
+      btns += `<button class="btn sm" data-a="jump" data-id="${it.id}" title="排到队首，下一个就处理它">${ico("arrowUp")}插队</button>`;
+    }
     if (["failed", "skipped", "irrelevant", "need_key", "queued"].includes(it.status)) btns += ` <button class="btn sm ghost" data-a="delete" data-id="${it.id}">删除</button>`;
-    return `<div class="qrow"><div style="min-width:0">
-        <div class="t"><a href="#/item/${it.id}" style="color:inherit">${esc(it.note_title || it.title || it.url || "（解析中）")}</a></div>
-        <div class="r"><span class="chip ${cls}">${label}</span> ${esc(it.reason || "")}</div></div>
+    // 队列序号 / 完成时间 / 刚添加
+    if (it.status === "queued") meta = `<span class="qnum">第 ${qpos} 位</span>`;
+    if (it.status === "done") meta = `<span class="qnum">${fmtDayTime(it.done_at || it.updated_at)} 完成</span>`;
+    const newBadge = isNew(it) ? `<span class="chip teal" style="margin-right:6px">刚添加</span>` : "";
+    return `<div class="qrow${it.status === "queued" && isNew(it) ? " fresh" : ""}"><div style="min-width:0">
+        <div class="t">${newBadge}<a href="#/item/${it.id}" style="color:inherit">${esc(it.note_title || it.title || it.url || "（解析中）")}</a></div>
+        <div class="r"><span class="chip ${cls}">${label}</span> ${meta} ${esc(it.reason || "")}</div></div>
         <div class="row">${btns}</div></div>`;
   }).join("") : `<div class="empty" style="padding:30px">这里是空的</div>`;
   $$("#qlist [data-a]").forEach((b) => b.onclick = async () => {
     const a = b.dataset.a;
     if (a === "delete" && !confirm("删除这条？")) return;
-    await api(`/api/items/${b.dataset.id}/action`, { action: a });
+    if (a === "jump") {
+      b.disabled = true;
+      try {
+        await api(`/api/items/${b.dataset.id}/action`, { action: "jump" });
+        toast("已插队，下一个就处理它");
+      } catch (e) { toast(e.message, 4000); b.disabled = false; return; }
+    } else {
+      await api(`/api/items/${b.dataset.id}/action`, { action: a });
+    }
     await refreshState(); renderProcessLive();
   });
   if (procTab === "need_key" && items.length > 1 && STATE.settings.api_key_set) {
@@ -2060,8 +2475,11 @@ async function renderProcessLive() {
 
 /* ---------------------------------------------------------------- 设置 */
 async function renderSettings() {
+  if (!window.__META) {
+    try { window.__META = await api("/api/meta"); } catch (e) { window.__META = {}; }
+  }
   await refreshState();
-  const s = STATE.settings, P = STATE.providers;
+  const s = STATE.settings, P = STATE.providers || (window.__META || {}).providers || {};
   view.innerHTML = `
     <div class="head"><div><h1>设置</h1><div class="muted">所有设置和数据都只保存在你自己的电脑上</div></div>
       <div class="spacer"></div><a class="btn" href="#/welcome">使用教程</a></div>
@@ -2079,8 +2497,23 @@ async function renderSettings() {
           <select id="modelPick" title="从列表选择模型"></select></div>
           <div class="hint"><span id="mHint">点右边的箭头从列表选择；也可以直接输入。</span> <a href="javascript:void 0" id="mLoad">刷新模型列表</a></div></div>
       </div>
+      <div class="row" style="margin:10px 0"><div class="field" style="max-width:200px;margin:0">
+          <label>并行分析条数</label><input id="par" type="number" min="1" max="8" value="${s.parallel || 4}"></div>
+        <span class="muted small" style="margin-left:12px">同时让几个模型一起提炼；取信息、下载、转文字仍按顺序做。改完下一批就生效。</span></div>
       <div class="row"><button class="btn" id="testBtn">测试连接</button><span class="small" id="testRes"></span>
         <span class="spacer"></span><span class="muted small">累计消耗约 ${(s.tokens_used || 0).toLocaleString()} tokens</span></div>
+    </div>
+    <div class="card form" style="margin-bottom:16px">
+      <h2>备用模型 <span class="chip gray">主模型超时就自动切过去</span></h2>
+      <p class="muted small">主模型连不上、超时、被限速，或者那家没余额时，自动改用下面这个模型继续跑，不会把整批任务卡死。</p>
+      <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" id="fbOn" ${s.fb_on ? "checked" : ""}> 启用备用模型</label></div>
+      <div class="grid2">
+        <div class="field"><label>服务商</label><select id="fbProvider">${Object.entries(P).map(([k, v]) => `<option value="${k}" ${s.fb_provider === k ? "selected" : ""}>${esc(v.name)}</option>`).join("")}</select></div>
+        <div class="field"><label>API Key ${s.fb_api_key_set ? `<span class="chip teal">已保存</span>` : ""}</label>
+          <input id="fbKey" type="password" placeholder="${s.fb_api_key_set ? "留空表示不修改" : "sk-..."}" autocomplete="off"></div>
+        <div class="field"><label>接口地址（Base URL）</label><input id="fbBase" value="${esc(s.fb_base_url || "")}"></div>
+        <div class="field"><label>模型</label><input id="fbModel" value="${esc(s.fb_model || "")}" placeholder="deepseek-flash"></div>
+      </div>
     </div>
     <div class="card form" style="margin-bottom:16px">
       <h2>精读（有人带着读）</h2>
@@ -2130,6 +2563,29 @@ async function renderSettings() {
         <div class="${STATE.ocr?.backend ? "" : "banner warn"}" style="${STATE.ocr?.backend ? "" : "margin:0"}">${STATE.ocr?.backend ? `✓ ${esc(STATE.ocr.label)}（在本机运行，图片不上传）` : "还没安装文字识别组件：请重新运行一次安装脚本。没装的话，图文只会用正文文字。"}</div></div>
       <div class="field"><label class="check"><input type="checkbox" id="mirror" ${s.use_hf_mirror ? "checked" : ""}> 使用国内镜像下载模型（人在中国大陆时勾选；在海外不要勾）</label></div>
       <div class="field"><label class="check"><input type="checkbox" id="keepVideo" ${s.keep_video ? "checked" : ""}> 转录后保留视频文件（默认删除，节省空间）</label></div>
+    </div>
+    <div class="card form" style="margin-bottom:16px">
+      <h2>外观</h2>
+      <div class="seg" id="segTheme" style="max-width:520px">
+        ${[["auto", "跟随系统"], ["light", "浅色（默认）"], ["white", "纯白"], ["dark", "深色"]]
+          .map(([v, l]) => `<button data-v="${v}" class="${(localStorage.getItem("theme") || "auto") === v ? "on" : ""}">${l}</button>`).join("")}
+      </div>
+      <p class="muted small" style="margin-top:8px">纯白：页面底色纯白、卡片靠细边框区分，白天看着更干净；深色：晚上护眼。</p>
+    </div>
+    <div class="card form" style="margin-bottom:16px">
+      <h2>自动化 <span class="chip teal">推荐全开</span></h2>
+      <p class="muted small">打开后你只需要做一件事：删掉不想要的。同步、排队、拆解都不用点。</p>
+      <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" id="autoSync" ${s.auto_sync ? "checked" : ""}> 自动同步收藏</label>
+        <span class="muted small" style="margin-left:12px">每</span>
+        <input id="autoMin" type="number" min="5" max="180" value="${s.auto_sync_min || 10}" style="max-width:90px;margin:0 6px">
+        <span class="muted small">分钟检查一次新收藏</span></div>
+      <div class="row" style="margin-bottom:10px"><label class="switch"><input type="checkbox" id="autoProc" ${s.auto_process ? "checked" : ""}> 有新条目就自动开始拆解</label></div>
+      <div class="row"><span class="muted small">可选：每天固定时间再同步一次</span>
+        <input id="autoSyncAt" type="time" value="${esc(s.auto_sync_at || "")}" style="max-width:150px;margin-left:10px"></div>
+      <div class="row" style="margin-top:12px"><label class="switch"><input type="checkbox" id="asrAuto" ${s.asr_auto ? "checked" : ""}> 语音模型按视频长短自动选</label>
+        <span class="muted small" style="margin-left:12px">5 分钟以内用 medium（更准），长视频用 small（更快）</span></div>
+      <div class="row" style="margin-top:12px"><button class="btn" id="auditCats">${ico("search")}自查分类</button>
+        <span class="muted small" id="auditRes" style="margin-left:12px">按关键词体检一遍，找出明显分错的条目（不花钱）</span></div>
     </div>
     <div class="card form" style="margin-bottom:16px" id="backupCard">
       <h2>备份与恢复</h2>
@@ -2235,6 +2691,23 @@ async function renderSettings() {
   initPick("deep", "dModelPick", "dModel", "dmHint", "dProvider");
   setupBackup();
   setupFreePlan();
+  $$("#segTheme button").forEach((b) => b.onclick = () => {
+    applyTheme(b.dataset.v);
+    $$("#segTheme button").forEach((x) => x.classList.toggle("on", x === b));
+    toast("外观已切换：" + b.textContent.trim());
+  });
+  $("#auditCats") && ($("#auditCats").onclick = async () => {
+    const btn = $("#auditCats");
+    btn.disabled = true;
+    try {
+      const r = await api("/api/audit_cats");
+      const box = $("#auditRes");
+      if (box) box.textContent = `已完成 ${r.total} 条，疑似分错 ${r.suspicious_n} 条 · 报告：${r.file || "data/tmp/cat_audit.md"}`;
+    } catch (e) {
+      toast(e.message, 5000);
+    }
+    btn.disabled = false;
+  });
   $("#openLib").onclick = () => api("/api/open", { what: "library" }).catch((e) => toast(e.message));
   $("#clearKey") && ($("#clearKey").onclick = async () => { if (confirm("清除已保存的 API Key？")) { await api("/api/settings", { clear_key: true }); toast("已清除"); renderSettings(); } });
   $("#saveBtn").onclick = async () => {
@@ -2243,7 +2716,14 @@ async function renderSettings() {
       deep_same: $("#deepSame").checked, deep_provider: $("#dProvider").value, deep_base_url: $("#dBase").value.trim(),
       deep_model: $("#dModel").value.trim(), deep_api_key: $("#dKey").value.trim(), deep_prompt: $("#dPrompt").value.trim(),
       deep_chunk_chars: +$("#dChunk").value,
+      fb_on: $("#fbOn").checked, fb_provider: $("#fbProvider").value,
+      parallel: Math.max(1, Math.min(8, +$("#par").value || 4)),
+      fb_base_url: $("#fbBase").value.trim(), fb_model: $("#fbModel").value.trim(),
+      fb_api_key: $("#fbKey").value.trim(),
       focus_topic: $("#focus").value.trim(), only_relevant: $("#onlyRel").checked, categories: $("#cats").value,
+      auto_sync: $("#autoSync").checked, auto_sync_min: Math.max(5, Math.min(180, +$("#autoMin").value || 10)),
+      auto_process: $("#autoProc").checked, auto_sync_at: $("#autoSyncAt").value || "",
+      asr_auto: $("#asrAuto").checked,
       whisper_model: $("#wm").value, asr_engine: $("#engine").value, use_subtitles: $("#useSubs").checked, max_minutes: +$("#maxMin").value, use_hf_mirror: $("#mirror").checked,
       keep_video: $("#keepVideo").checked, library_dir: $("#libDir").value.trim(), browser: $("#browser").value, welcome_done: true,
     });
@@ -2254,6 +2734,10 @@ async function renderSettings() {
 /* ---------------------------------------------------------------- 启动 */
 let weeklyDue = null;
 (async () => {
+  try {
+    const meta = await api("/api/meta");
+    window.__META = meta || {};
+  } catch (e) { window.__META = {}; }
   const sideSearch = $("#sideSearch");
   if (sideSearch) {
     let st = null;
@@ -2347,8 +2831,9 @@ function fillPick(pickId, inputId, models, hintId, live) {
 }
 
 /* ---------------------------------------------------------------- 图文：画廊与大图 */
-function galleryHtml(images) {
-  return `<div class="gallery">${images.map((src, i) => `<img src="/files/${encodeURI(src)}" data-g="${i}" loading="lazy" alt="图 ${i + 1}">`).join("")}</div>`;
+function galleryHtml(images, ver) {
+  const v = ver ? `?v=${Math.floor(ver * 1000)}` : "";
+  return `<div class="gallery">${images.map((src, i) => `<img src="/files/${encodeURI(src)}${v}" data-g="${i}" loading="lazy" alt="图 ${i + 1}">`).join("")}</div>`;
 }
 function bindGallery(root, images) {
   if (!images?.length) return;

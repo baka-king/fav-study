@@ -17,7 +17,7 @@ from .config import DB_PATH
 #   irrelevant   和关注主题无关（自动收起，不算失败）
 #   skipped      广告 / 图文 / 纯音乐 / 无对白，自动跳过
 #   failed       失败，可以重试
-ACTIVE = ("fetching", "downloading", "transcribing", "extracting")
+ACTIVE = ("fetching", "downloading", "transcribing", "extracting", "retry_wait")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -45,6 +45,11 @@ CREATE TABLE IF NOT EXISTS items (
   learned_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
+CREATE INDEX IF NOT EXISTS idx_items_live ON items(deleted_at, status);
+CREATE INDEX IF NOT EXISTS idx_items_platform ON items(platform);
+CREATE INDEX IF NOT EXISTS idx_items_category ON items(category);
+CREATE INDEX IF NOT EXISTS idx_items_aweme ON items(aweme_id);
+CREATE INDEX IF NOT EXISTS idx_items_published ON items(published_at);
 -- 共识观点：每个分类一份，AI 从这个分类的多条笔记里找出互相印证 / 有分歧的观点
 CREATE TABLE IF NOT EXISTS insights (
   category TEXT PRIMARY KEY,
@@ -85,6 +90,9 @@ EXTRA_COLUMNS = {
     "platform": "TEXT",
     "play_url": "TEXT",
     "play_url_ts": "REAL",        # douyin / xhs（小红书）；空 = 抖音老数据
+    "bili_desc": "TEXT",        # B 站视频简介（没字幕时给 AI 的补充材料）
+    "queue_prio": "REAL",         # 插队：数值越大越先处理（手动添加/点插队时置为当前时间）
+    "done_at": "REAL",            # 处理完成的时间（用来按先后顺序看刚做完的）
 }
 
 # 时长筛选：≤1 分钟 / 1-5 分钟 / 5-15 分钟 / 15 分钟以上
@@ -124,7 +132,8 @@ def _row(r):
 
 
 def add(source, *, aweme_id=None, url=None, local_path=None, title=None, author=None,
-        duration=None, cover=None, published_at=None, collected_at=None, platform=None):
+        duration=None, cover=None, published_at=None, collected_at=None, platform=None,
+        jump=False):
     """新增一条；同一个视频（aweme_id 相同）不会重复添加。返回 (id, 是否新增)。"""
     now = time.time()
     with _write_lock:
@@ -143,12 +152,15 @@ def add(source, *, aweme_id=None, url=None, local_path=None, title=None, author=
                     c.execute("UPDATE items SET deleted_at=NULL WHERE id=?", (r["id"],))
                     c.commit()
                 return r["id"], False
+        # 手动添加的（粘贴链接 / 本地文件 / 手动导入）自动插队：用户刚发进来的要先处理；
+        # 自动同步收藏夹进来的不插队，否则一次同步会把整条队列顶翻
+        prio = now if jump else None
         cur = c.execute(
             "INSERT INTO items(source,aweme_id,url,local_path,title,author,duration,cover,status,"
-            "published_at,collected_at,created_at,updated_at,platform)"
-            " VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?)",
+            "published_at,collected_at,created_at,updated_at,platform,queue_prio)"
+            " VALUES(?,?,?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
             (source, aweme_id, url, local_path, title, author, duration, cover,
-             published_at, collected_at, now, now, platform or "douyin"))
+             published_at, collected_at, now, now, platform or "douyin", prio))
         c.commit()
         return cur.lastrowid, True
 
@@ -160,6 +172,8 @@ def update(item_id, **fields):
         if name in fields:
             v = fields.pop(name)
             fields[col] = json.dumps(v, ensure_ascii=False) if v is not None else None
+    if fields.get("status") == "done" and not fields.get("done_at"):
+        fields.setdefault("done_at", time.time())
     fields["updated_at"] = time.time()
     keys = list(fields)
     with _write_lock:
@@ -225,9 +239,41 @@ PRIORITY_SQL = (
 SKIP_CATS = ("生活与娱乐",)
 
 
+def jump(item_id):
+    """手动插队：把这条排到队首。"""
+    with _write_lock:
+        conn().execute("UPDATE items SET queue_prio=?, updated_at=? WHERE id=?",
+                       (time.time(), time.time(), item_id))
+        conn().commit()
+
+
+def today_summary():
+    """今天拆了多少条、进了哪些分类（给「今日汇总」卡片用）。"""
+    import datetime
+    t0 = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    c = conn()
+    added = c.execute("SELECT COUNT(*) FROM items WHERE created_at>=? AND COALESCE(deleted_at,0)=0",
+                      (t0,)).fetchone()[0]
+    done = c.execute("SELECT COUNT(*) FROM items WHERE status='done' AND COALESCE(done_at,0)>=?",
+                     (t0,)).fetchone()[0]
+    skipped = c.execute("SELECT COUNT(*) FROM items WHERE status IN ('skipped','irrelevant')"
+                        " AND updated_at>=? AND COALESCE(deleted_at,0)=0", (t0,)).fetchone()[0]
+    rows = c.execute("SELECT category, COUNT(*) n FROM items WHERE status='done' AND COALESCE(done_at,0)>=?"
+                     " GROUP BY category ORDER BY n DESC LIMIT 6", (t0,)).fetchall()
+    return {"added": added, "done": done, "skipped": skipped,
+            "cats": [{"cat": r["category"] or "未分类", "n": r["n"]} for r in rows]}
+
+
+def count_remote_covers():
+    """还有多少条封面挂在远端（图床签名过期后会拉不到）。"""
+    return conn().execute(
+        "SELECT COUNT(*) FROM items WHERE cover LIKE 'http%' AND COALESCE(deleted_at,0)=0").fetchone()[0]
+
+
 def next_queued():
     return _row(conn().execute(
-        f"SELECT * FROM items WHERE status='queued' AND COALESCE(deleted_at,0)=0 ORDER BY {PRIORITY_SQL} id LIMIT 1").fetchone())
+        "SELECT * FROM items WHERE status='queued' AND COALESCE(deleted_at,0)=0 "
+        f"ORDER BY COALESCE(queue_prio,0) DESC, {PRIORITY_SQL} id LIMIT 1").fetchone())
 
 
 def skip_by_category(cats=SKIP_CATS, reason="生活/娱乐类内容，不拆解"):
@@ -245,14 +291,17 @@ def skip_by_category(cats=SKIP_CATS, reason="生活/娱乐类内容，不拆解"
 
 
 def list_items(status=None, category=None, sub=None, q=None, learned=None, starred=None,
-               dur=None, sort="new", limit=1000, stage=None, platform=None):
+               dur=None, sort="new", limit=1000, stage=None, platform=None, since=None,
+               scope=None):
     # 列表页只要摘要，不要把整份 note_json 都塞进响应里（笔记多了会到好几 MB）
     sql = ("SELECT id,source,aweme_id,url,title,author,duration,cover,status,reason,category,"
            "category_src,subcategory,learned,starred,created_at,updated_at,published_at,collected_at,media_type,platform,url,"
            "(deep_json IS NOT NULL) AS has_deep,"
            "json_extract(note_json,'$.summary') AS summary,"
            "json_extract(note_json,'$.title') AS note_title,"
-           "json_extract(note_json,'$.difficulty') AS difficulty FROM items WHERE 1=1")
+           "queue_prio,done_at,"
+           "json_extract(note_json,'$.difficulty') AS difficulty FROM items "
+           "WHERE COALESCE(deleted_at,0)=0")   # 回收站里的不进任何列表
     args = []
     if status and status != "all":
         statuses = status.split(",")
@@ -286,16 +335,37 @@ def list_items(status=None, category=None, sub=None, q=None, learned=None, starr
         if hi is not None:
             sql += " AND duration <= ?"
             args.append(hi)
+    if since:
+        # 按「什么时候进到库里」筛：抖音收藏列表不带收藏时间，入库时间就是最接近的
+        sql += " AND COALESCE(NULLIF(collected_at,0), created_at) >= ?"
+        args.append(float(since))
     if q:
         like = f"%{q}%"
-        sql += " AND (title LIKE ? OR author LIKE ? OR note_json LIKE ? OR transcript LIKE ? OR my_note LIKE ?)"
-        args += [like] * 5
+        if scope == "title":
+            sql += " AND title LIKE ?"
+            args.append(like)
+        elif scope == "author":
+            sql += " AND author LIKE ?"
+            args.append(like)
+        elif scope == "body":
+            sql += " AND (note_json LIKE ? OR transcript LIKE ? OR my_note LIKE ?)"
+            args += [like] * 3
+        else:
+            sql += (" AND (title LIKE ? OR author LIKE ? OR note_json LIKE ? OR transcript LIKE ?"
+                    " OR my_note LIKE ?)")
+            args += [like] * 5
     # 时间排序：优先用收藏时间，其次发布时间，最后入库时间
-    tkey = "COALESCE(collected_at, published_at, created_at)"
+    tkey = "COALESCE(NULLIF(collected_at,0), published_at, created_at)"
+    added = "COALESCE(NULLIF(collected_at,0), created_at)"   # 什么时候收藏/入库的
     sql += {"long": " ORDER BY duration DESC, id DESC",
             "short": " ORDER BY duration ASC, id DESC",
             "time_desc": f" ORDER BY {tkey} DESC, id DESC",
-            "time_asc": f" ORDER BY {tkey} ASC, id ASC"}.get(sort, " ORDER BY id DESC")
+            "time_asc": f" ORDER BY {tkey} ASC, id ASC",
+            "new": f" ORDER BY {added} DESC, id DESC",   # 最新收藏：按进库时间
+            # 处理中的排最前，其余按插队值 → 原优先级 → id
+            "queue": f" ORDER BY CASE WHEN status='queued' THEN 1 ELSE 0 END, COALESCE(queue_prio,0) DESC, {PRIORITY_SQL} id ASC",
+            "done": " ORDER BY COALESCE(done_at, updated_at) DESC, id DESC",
+            "done_asc": " ORDER BY COALESCE(done_at, updated_at) ASC, id ASC"}.get(sort, " ORDER BY id DESC")
     sql += " LIMIT ?"
     args.append(limit)
     out = []

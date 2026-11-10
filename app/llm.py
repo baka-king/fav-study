@@ -39,8 +39,10 @@ SYSTEM = """你是一位擅长把短视频内容整理成学习笔记的助手�
 }}
 
 规则：
-- 如果视频是广告带货、短剧剧情、唱歌跳舞、纯娱乐闲聊，或几乎没有实质信息，返回 {{"skip": true, "skip_reason": "简短原因"}}。
-- 如果有实质内容，但和用户关注的主题无关，"relevant" 填 false，其他字段照常填写。
+- **永远不要 skip**：哪怕只是广告、短剧、闲聊、纯音乐，也要照实写出一条笔记（标题、summary、1-3 条 points），
+  并在 summary 第一句说明「这条没有可学习的内容」。只有实在没有任何文字可读时，skip 才为 true。
+- 分类**必须从下面的分类列表里原样选**：判断的是内容本身是什么（美食就是美食与烹饪，健身就是健身与健康），
+  不要按「和 AI 主题是否相关」来选；哪个都不合适就填「无法分类」，不要硬塞。
 - 不要编造视频里没有的信息；转写里明显听错的专有名词（比如工具名）可以按常识纠正。
 - 全部使用简体中文。quiz 出 1-3 题。"""
 
@@ -86,6 +88,24 @@ def _apply_quirks(payload, key):
 
 
 def chat(cfg, messages, json_mode=True, temperature=0.3, max_tokens=None, timeout=120, retry_429=True):
+    """带备用模型的入口：主模型超时/连不上/5xx 时自动切到配置里的备用模型。"""
+    cfg = _as_cfg(cfg)
+    fb = cfg.get("fallback") if isinstance(cfg, dict) else None
+    try:
+        return _chat_one(cfg, messages, json_mode=json_mode, temperature=temperature,
+                         max_tokens=max_tokens, timeout=timeout, retry_429=retry_429)
+    except LLMError as e:
+        msg = str(e)
+        # 超时 / 连不上 / 5xx / 限速 / 主模型那家没余额 → 都值得试一次备用
+        worth = getattr(e, "retry", False) or "余额不足" in msg or "429" in msg or "限速" in msg
+        if not fb or not worth:
+            raise
+        print(f"[AI] 主模型 {cfg.get('model')} 失败（{str(e)[:60]}），改用备用 {fb.get('model')}", flush=True)
+        return _chat_one(fb, messages, json_mode=json_mode, temperature=temperature,
+                         max_tokens=max_tokens, timeout=timeout, retry_429=retry_429)
+
+
+def _chat_one(cfg, messages, json_mode=True, temperature=0.3, max_tokens=None, timeout=120, retry_429=True):
     """返回 (文本, 消耗的 token 数)。带重试：网络/5xx 重试 2 次，429/529 限速等 5 秒。
 
     cfg 可以是整份设置，也可以是 config.llm_cfg() 的结果。
@@ -214,6 +234,55 @@ def _obj_list(v, keys):
     return out
 
 
+CATEGORY_GUIDE = {
+    "AI 编程": "写代码、框架库用法、部署调试、Git、接口对接、开源项目实现；不收「只介绍工具怎么装」",
+    "AI 工具推荐": "介绍具体 AI 工具/插件/客户端/网站：是什么、怎么装、有什么效果；不收「讲原理实现」",
+    "提示词技巧": "提示词写法、角色设定、模板、系统提示词调教；不收「展示 AI 作品」",
+    "AI 办公效率": "用 AI 处理文档表格 PPT 邮件、自动化流程、时间管理；不收「纯编程实现」",
+    "AI 副业与变现": "用 AI 赚钱的具体方法：接单、带货、做号、报价、获客；不收「只喊口号」",
+    "AI 绘画与视频": "绘画/视频生成工具与提示词、AIGC 作品与创作流程、AI 剪辑；不收「真人拍摄后期」",
+    "大模型与行业资讯": "模型发布与对比、评测、公司动态、行业趋势、榜单；不收「怎么用某个工具」",
+    "AI 学习方法": "怎么学会用 AI 的路径、课程体系、学习法；不收「通用考试学习」",
+    "摄影与剪辑": "拍摄构图布光、修图调色、剪辑、器材；不收「AI 生成图像」",
+    "美食与烹饪": "菜谱做法、食材处理、探店、厨具、减脂餐做法；不收「只拍吃播不教做法」",
+    "健身与健康": "训练动作与计划、减脂增肌、康复体态、睡眠健康；不收「只记录打卡」",
+    "穿搭与美妆": "穿搭、妆容、护肤、发型、彩妆测评；不收「cosplay 装扮展示」",
+    "学习与成长": "通用学习方法、考试考证、职场成长、思维方式、英语学习；不收「AI 工具学习」",
+    "商业与创业": "生意运营、商业模式、团队管理、行业观察、非 AI 的赚钱路径；不收「用 AI 变现」",
+    "生活与娱乐": "日常记录、影视动漫游戏、搞笑、旅游、宠物、cosplay 展示；不收「有明确方法论的内容」",
+    "无法分类": "确实不属于以上任何一类，或标题/内容抓取失败、没有可判断信息",
+}
+
+
+def classify_category(text: str, cats) -> str:
+    """把一段内容归进给定分类；只有真的一类都不沾边才「无法分类」。"""
+    from . import config
+    cats = [c for c in (cats or []) if c] or ["无法分类"]
+    if not (text or "").strip():
+        return None
+    guide = "\n".join(f"- {c}：{CATEGORY_GUIDE.get(c, '见分类名')}" for c in cats)
+    sys_p = ("你是内容分类器。先看内容讲的是什么，再从下面的分类里选出**最贴近的一个**：\n" + guide +
+             "\n\n规则：\n"
+             "1. 按内容本身所属的领域选（美食就美食、健身就健身、AI 工具就 AI 工具推荐）；\n"
+             "2. **尽量别用「无法分类」**：只要有一类沾边就选它，拿不准就选最接近的；\n"
+             "3. 分类名必须从上面原样抄，不许自拟。\n"
+             '只输出一个 JSON：{"category":"分类名"}')
+    cfg = config.llm_cfg(config.load(), "main")
+    raw, _ = chat(cfg, [{"role": "system", "content": sys_p},
+                        {"role": "user", "content": text[:900]}],
+                  json_mode=True, temperature=0, max_tokens=900, timeout=60, retry_429=False)
+    if not (raw or "").strip():
+        return None                       # 请求失败/为空：保持原分类，别乱动
+    try:
+        d = parse_json(raw)
+    except Exception:
+        return None
+    cat = str((d or {}).get("category") or "").strip()
+    if not cat:
+        return None
+    return cat if cat in cats else "无法分类"
+
+
 def normalize(d: dict) -> dict:
     """统一字段格式，校验不过就抛错。"""
     if d.get("skip") is True:
@@ -241,7 +310,8 @@ def normalize(d: dict) -> dict:
 
 def extract(settings, title, author, transcript, kind="video"):
     """返回 (笔记 dict, token 数)。"""
-    cats = "、".join(settings.get("categories") or [])
+    _cats = [c for c in (settings.get("categories") or []) if c]
+    cats = chr(10).join(f"- {c}：{CATEGORY_GUIDE.get(c, '见分类名')}" for c in _cats)
     messages = [
         {"role": "system", "content": SYSTEM.format(focus=settings.get("focus_topic") or "不限", categories=cats)},
         {"role": "user", "content": USER.format(

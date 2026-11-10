@@ -172,6 +172,27 @@ class Browser:
         self.ctx = None
         self.page = None
 
+    def minimize(self):
+        """把自动化窗口最小化，避免它在桌面上弹出来干扰用户。"""
+        try:
+            if not self.page or self.page.is_closed():
+                return
+            cdp = self.ctx.new_cdp_session(self.page)
+            info = cdp.send("Browser.getWindowForTarget")
+            cdp.send("Browser.setWindowBounds",
+                     {"windowId": info["windowId"], "bounds": {"windowState": "minimized"}})
+        except Exception:
+            try:
+                self.page.evaluate("window.blur && window.blur()")
+            except Exception:
+                pass
+
+    def hide(self):
+        """登录/同步做完后，回到后台模式（下次处理时不会再弹窗）。"""
+        self.visible = False
+        self._visible = False
+        self.minimize()
+
     def start(self, visible=None):
         if visible is not None:
             self.visible = bool(visible)
@@ -192,7 +213,11 @@ class Browser:
                 "--no-proxy-server",
                 f"--remote-debugging-port={CDP_PORT}"]
         if not self.visible:
-            args += ["--window-position=-3200,-3200", "--window-size=1280,860"]
+            args += ["--window-position=-3200,-3200", "--window-size=1280,860",
+                     # 最小化/被遮住时也要继续渲染，不然抓页面会超时
+                     "--disable-backgrounding-occluded-windows",
+                     "--disable-renderer-backgrounding",
+                     "--disable-background-timer-throttling"]
         else:
             args += ["--window-position=140,90", "--window-size=1200,880"]
         last = None
@@ -210,6 +235,8 @@ class Browser:
             raise XhsError(f"打不开浏览器：{last}")
         self._visible = self.visible
         self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+        if not self.visible:
+            self.minimize()
         self.host = "www.xiaohongshu.com"
         try:
             if not (self.page.url or "").startswith("http"):
@@ -333,7 +360,7 @@ class Browser:
         raise NotLoggedIn("等了 5 分钟还没登录小红书")
 
     # ---- 解析单条笔记
-    def fetch_note(self, note_id, url=None, token=None):
+    def fetch_note(self, note_id, url=None, token=None, need_video=True):
         self.start()
         url = url or f"https://{self.host}/explore/{note_id}"
         if token and "xsec_token" not in url:
@@ -357,23 +384,62 @@ class Browser:
                 dom = self.page.evaluate("""() => {
                     const v = document.querySelector('video');
                     const og = document.querySelector('meta[property="og:video"]');
-                    const imgs = [...document.querySelectorAll('img')]
-                        .map(i => i.currentSrc || i.src)
-                        .filter(u => /xhscdn|sns-img|sns-webpic/.test(u));
-                    return {video: (v && (v.currentSrc || v.src)) || (og && og.content) || '',
-                            title: document.title || '', imgs: [...new Set(imgs)].slice(0, 12)};
+                    // 只认「这条笔记自己的图」：以前抓整页的图，结果把旁边推荐流、广告、
+                    // 评论区的截图也当成笔记内容，笔记里就出现了完全无关的文字。
+                    const junk = '[class*=recommend],[class*=sidebar],[class*=comment],[class*=ad-],[class*=banner],[class*=footer],[class*=header]';
+                    const scopes = ['#noteContainer', '.note-container', '.media-container', '.swiper-slide',
+                                    '.note-scroller', 'section.note-item', '.note-detail'];
+                    const okUrl = (u) => /^https?:/i.test(u) && /xhscdn|sns-img|sns-webpic/.test(u) && !/avatar/i.test(u);
+                    let imgs = [];
+                    for (const sel of scopes) {
+                        for (const box of document.querySelectorAll(sel)) {
+                            if (box.closest(junk)) continue;
+                            const list = [...box.querySelectorAll('img')]
+                                .map(i => i.currentSrc || i.src).filter(okUrl);
+                            if (list.length > imgs.length) imgs = list;
+                        }
+                    }
+                    if (!imgs.length) {
+                        // 再退一步：只取页面里尺寸够大的图（头像/缩略图都不算）
+                        imgs = [...document.querySelectorAll('img')]
+                            .filter(i => !i.closest(junk))
+                            .filter(i => (i.naturalWidth || 0) >= 400)
+                            .map(i => i.currentSrc || i.src).filter(okUrl);
+                    }
+                    const ogi = document.querySelector('meta[property="og:image"]');
+                    const desc = (document.querySelector('#detail-desc .note-text') ||
+                                  document.querySelector('.note-content .note-text') ||
+                                  document.querySelector('#detail-desc') ||
+                                  document.querySelector('meta[name="description"]') ||
+                                  document.querySelector('meta[property="og:description"]'));
+                    const descText = desc ? (desc.content || desc.innerText || '') : '';
+                    const raw = (v && (v.currentSrc || v.src)) || (og && og.content) || '';
+                    // 小红书视频用的是 blob: 流（MSE），下载不了 → 只认 http 地址
+                    const uniq = [...new Set(imgs)].slice(0, 18);
+                    if (!uniq.length && ogi && okUrl(ogi.content)) uniq.push(ogi.content);
+                    return {video: /^https?:/i.test(raw) ? raw : '',
+                            hasVideo: !!v,
+                            desc: descText.trim().slice(0, 4000),
+                            title: document.title || '', imgs: uniq};
                 }""") or {}
             except Exception:
                 dom = {}
+            if need_video and dom.get("hasVideo") and not (dom.get("video") or "").strip():
+                # 页面确实有视频，但只是 blob: 流，取不到真实地址 → 明确报错，别当图文乱抓图
+                raise XhsError("这条小红书视频的播放地址没取到（小红书页面限制），稍后重试")
             info = {
                 "title": re.sub(r"\s*-\s*小红书\s*$", "", (dom.get("title") or "")).strip(),
-                "desc": "", "author": "",
+                "desc": (dom.get("desc") or "").strip(), "author": "",
                 "video_url": (dom.get("video") or "").strip() or None,
                 "images": dom.get("imgs") or [],
                 "cover": (dom.get("imgs") or [""])[0], "duration": 0,
             }
         if not info:
             raise XhsError("解析失败：小红书这条没读到内容（可能需要登录，或者笔记已删除）")
+        # 抓到的只是通用页/验证页（没登录或被风控）→ 直接报错，别把垃圾写成笔记
+        _t = (info.get("title") or "").strip()
+        if _t in ("小红书 - 你的生活兴趣社区", "安全验证", "", "小红书") or "你的生活兴趣社区" in _t:
+            raise XhsError("小红书返回的是通用页/验证页（多半登录失效或被风控），请重新扫码登录后重试")
         info["url"] = url
         info["note_id"] = note_id
         info["is_note"] = not bool(info.get("video_url"))
@@ -383,6 +449,8 @@ class Browser:
         self.start()
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_suffix(dest.suffix + ".part")
+        if not str(url).startswith("http"):
+            raise XhsError("这条的下载地址无效（不是 http 地址），跳过")
         headers = {"User-Agent": "Mozilla/5.0", "Referer": HOME + "/"}
         try:
             resp = self.ctx.request.get(url, headers=headers, timeout=180000)
@@ -400,6 +468,21 @@ class Browser:
             raise XhsError(f"下载失败：{str(e)[:120]}")
 
     # ---- 同步收藏
+    def grab_image(self, url, dest):
+        """用浏览器自己的登录态把图片存到 dest（图床对 Referer/签名挑得很凶）。"""
+        self.start()
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        headers = {"User-Agent": "Mozilla/5.0", "Referer": HOME + "/"}
+        resp = self.ctx.request.get(url, headers=headers, timeout=30000)
+        if not resp.ok:
+            raise XhsError(f"取图失败：HTTP {resp.status}")
+        body = resp.body()
+        if len(body) < 1024:
+            raise XhsError("取到的图太小，多半是占位图")
+        dest.write_bytes(body)
+        return dest
+
     def download_images(self, images, dest_dir):
         """images 是 [[候选地址...], ...]，返回保存好的文件路径列表。"""
         self.start()
@@ -528,7 +611,7 @@ class Browser:
             self.page.goto(f"https://{self.host}/user/profile/{uid}?tab=fav",
                            wait_until="domcontentloaded", timeout=60000)
             self.page.wait_for_timeout(2500)
-            deadline = time.time() + 240
+            deadline = time.time() + 480
             for _ in range(120):
                 if should_stop() or bag["done"] or time.time() > deadline:
                     break

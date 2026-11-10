@@ -128,9 +128,21 @@ def parse_aweme(a: dict) -> dict:
             if u and u.startswith("http") and u not in urls:
                 urls.append(u)
 
+    # 优先 720p：体积只有原画的 1/3~1/5，下载快、不占空间，转文字和观看都够用
+    brs = sorted(video.get("bit_rate") or [], key=lambda b: b.get("bit_rate", 0))
+    pref = None
+    for b in brs:
+        gear = str(b.get("gear_name") or "").lower()
+        if "720" in gear:
+            pref = b
+            break
+    if pref is None and brs:
+        pref = brs[0]
+    if pref:
+        add((pref.get("play_addr") or {}).get("url_list"))
     add((video.get("play_addr") or {}).get("url_list"))
     add((video.get("play_addr_h264") or {}).get("url_list"))
-    for br in sorted(video.get("bit_rate") or [], key=lambda b: b.get("bit_rate", 0)):
+    for br in brs:
         add((br.get("play_addr") or {}).get("url_list"))
     add((video.get("download_addr") or {}).get("url_list"))
 
