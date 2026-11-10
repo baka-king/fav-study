@@ -160,6 +160,7 @@ let dyItem = null;
 function closeDyModals() {
   ["#playModal", "#cmtModal"].forEach((s) => { const m = $(s); if (m) m.hidden = true; });
   const v = $("#playVideo");
+  if (v) { try { v.muted = false; if (!v.volume) v.volume = 1; } catch (e) {} }
   if (v) { try { v.pause(); } catch (e) {} v.removeAttribute("src"); try { v.load(); } catch (e) {} v.hidden = true; }
   stopDanmaku();
 }
@@ -1442,10 +1443,23 @@ async function renderItem(id, tab) {
     const start = () => {
       const b = btn();
       if (b) b.hidden = true;
+      // 浏览器有时会按自动播放策略把元素静音，用户点了就一定要出声
+      try { wv.muted = false; if (!wv.volume) wv.volume = 1; } catch (e) {}
       wv.play().catch(() => { const b2 = btn(); if (b2) b2.hidden = false; });
     };
     btn() && (btn().onclick = start);
-    wv.addEventListener("playing", () => { const b = btn(); if (b) b.hidden = true; });
+    wv.addEventListener("playing", () => {
+      const b = btn(); if (b) b.hidden = true;
+      // 播了两秒还没有音频数据 → 多半这条视频本身就是无声的
+      setTimeout(() => {
+        try {
+          if (wv.webkitAudioDecodedByteCount === 0 && !wv.dataset.noaudio) {
+            wv.dataset.noaudio = "1";
+            toast("这条视频本身没有声音（文件里没有音轨）", 4000);
+          }
+        } catch (e) {}
+      }, 2000);
+    });
     wv.addEventListener("error", () => {
       const e = $("#watchErr");
       if (e) e.hidden = false;
