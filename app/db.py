@@ -1,3 +1,5 @@
+import collections
+import re
 """SQLite 条目库。每条视频一行，记录处理状态、文字稿、AI 笔记和学习进度。"""
 import json
 import sqlite3
@@ -588,6 +590,10 @@ DUP_NOTE = 0.55    # 笔记（拆解）这么像：判断为重复
 NEAR = 0.35        # 达到这个相似度的连成一组，标成「内容相近」
 
 
+_BOILER = re.compile(r"没有可学习的实质内容|没有可提取|无法提取|没有可识别|没有可获取|无实际内容|"
+                     r"没有可学习的|仅剩片尾|没有可提取的具体")
+
+
 def similar_content_groups(limit=80, platform=None):
     """按「拆解出来的内容」找相似条目。
 
@@ -620,8 +626,12 @@ def similar_content_groups(limit=80, platform=None):
         d["summary"] = d["note"].get("summary") or ""
         d["note_title"] = d["note"].get("title") or ""
         items.append(d)
-        text_docs[d["id"]] = _doc_tokens((d.get("transcript") or "")[:2500])
-        note_docs[d["id"]] = _doc_tokens(_note_text(d))
+        # 套话（"没有可学习的实质内容/无法提取"）不是内容，参与相似度会把一堆无关视频连成一片
+        boiler = bool(_BOILER.search(d["summary"] + " " + " ".join(
+            str(x) for x in (d["note"].get("points") or [])[:4])))
+        d["boiler"] = boiler
+        text_docs[d["id"]] = collections.Counter() if boiler else _doc_tokens((d.get("transcript") or "")[:2500])
+        note_docs[d["id"]] = collections.Counter() if boiler else _doc_tokens(_note_text(d))
     if len(items) < 2:
         return []
     key = (len(items), max((it.get("updated_at") or 0) for it in items))

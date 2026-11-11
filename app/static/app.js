@@ -516,6 +516,7 @@ function route() {
   }
   if (p[0] === "welcome") return { name: "welcome" };
   if (p[0] === "cache") return { name: "cache" };
+  if (p[0] === "skills") return { name: "skills", tab: p[1] || "" };
   if (p[0] === "process") return { name: "process", tab: p[1] || "" };
   if (p[0] === "settings") return { name: "settings" };
   if (p[0] === "graph") return { name: "graph", tab: p[1] === "consensus" ? "consensus" : "map", category: p.slice(2).join("/") };
@@ -547,6 +548,7 @@ async function render() {
   if (r.name === "cache") return renderCache();
   if (r.name === "process") return renderProcess();
   if (r.name === "settings") return renderSettings();
+  if (r.name === "skills") return renderSkills(r.tab);
   if (r.name === "graph") return renderGraphPage(r.tab, r.category);
   if (r.name === "weekly") return renderWeekly(r.offset);
 }
@@ -3270,4 +3272,191 @@ async function renderWeekly(offset) {
     try { await api("/api/weekly/save", { offset: r.offset }); toast("已保存到「_周报」文件夹"); }
     catch (e) { toast(e.message, 4000); }
   };
+}
+
+/* ======================================================== 技能库（只碰 AI / 学习类） ======================================================== */
+let SKILLS = null, skillsTab = "do", skillsBusy = false;
+
+function skCover(src, name) {
+  // 只画确实存在的本地封面；没有就用色块，绝不放会裂的远程图
+  if (src && src.startsWith("/files/")) {
+    return `<span class="sk-cover"><img src="${esc(src)}" loading="lazy" alt="" onerror="this.parentNode.innerHTML='<b>'+${JSON.stringify((name || "技")[0] || "技")}+'</b>'"></span>`;
+  }
+  return `<span class="sk-cover sk-cover-ph"><b>${esc((name || "技")[0] || "技")}</b></span>`;
+}
+function skTime(t) { return t ? new Date(t * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "还没审查"; }
+
+function skCard(s, rank) {
+  // 取第一个真正有本地封面的来源（都已校验过属于该条，不会张冠李戴）
+  const c = ((s.sources || []).find(x => x.cover && x.cover.startsWith("/files/")) || {}).cover || null;
+  const p = s.priority || 1;
+  return `<div class="sk-card" data-sid="${esc(s.id)}">
+    <div class="sk-row">
+      ${skCover(c, s.name)}
+      <div class="sk-main">
+        <div class="sk-title"><b>${esc(s.name)}</b>
+          <span class="chip ${p >= 4 ? "warn" : "gray"}">P${p}</span>
+          <span class="chip gray">${esc(s.category)}</span>
+          ${s.already ? `<span class="chip teal">已装</span>` : ""}
+          ${s.learned ? `<span class="chip teal">已学</span>` : ""}
+          ${s.n > 1 ? `<span class="chip gray">${s.n} 条笔记</span>` : ""}
+          ${s.verified === false ? `<span class="chip bad">本地待核对</span>` : ""}
+          ${rank ? `<span class="sk-rank">#${rank}</span>` : ""}
+        </div>
+        <div class="sk-why">${esc(s.why || "在多条笔记里反复出现，值得动手")}</div>
+        <div class="sk-act">👉 ${esc(s.action || "打开来源笔记，照步骤试一遍")}</div>
+        <div class="sk-src">来源：${(s.sources || []).slice(0, 3).map(x => `<a href="#/item/${x.id}" title="本地笔记已校验">${esc(x.title)}</a>`).join(" · ") || "—"}</div>
+      </div>
+      <div class="sk-btns">
+        <button class="btn sm" data-smark="${esc(s.id)}" data-field="installed">${s.installed ? "取消已装" : "标为已装"}</button>
+        <button class="btn sm ghost" data-smark="${esc(s.id)}" data-field="ignored">不看这条</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function skDupCard(g, i) {
+  return `<div class="sk-card sk-dup">
+    <div class="sk-row">
+      <span class="sk-cover sk-cover-ph"><b>重</b></span>
+      <div class="sk-main">
+        <div class="sk-title"><b>${esc(g.kind)}</b><span class="chip gray">${(g.items || []).length} 条${g.total ? " / 共 " + g.total + " 条" : ""}</span></div>
+        <div class="sk-why">${esc(g.reason || "内容重复")}${g.kind === "同一技能" ? " · 点开合并着看" : " · 点开逐条看，自己决定留哪条"}</div>
+        <div class="sk-src">${(g.items || []).map(x => `<a href="#/item/${x.id}">${esc(x.title)}</a>`).join(" · ")}</div>
+      </div>
+      <div class="sk-btns"><a class="btn sm" href="#/dups">去查重页</a></div>
+    </div>
+  </div>`;
+}
+
+function skOldCard(o) {
+  return `<div class="sk-card sk-old">
+    <div class="sk-row">
+      ${skCover(o.cover, o.title)}
+      <div class="sk-main">
+        <div class="sk-title"><b>${esc(o.title)}</b><span class="chip bad">建议删除</span><span class="chip gray">${esc(o.category)}</span></div>
+        <div class="sk-why">${esc(o.reason)}</div>
+        <div class="sk-src"><a href="#/item/${o.id}">打开笔记确认</a>${o.md_ok ? " · 本地文件在" : " · 本地文件缺失"}</div>
+      </div>
+      <div class="sk-btns"><button class="btn sm ghost" data-sdel="${o.id}">移入回收站</button></div>
+    </div>
+  </div>`;
+}
+
+async function renderSkills(tab) {
+  if (tab) skillsTab = tab;
+  let r;
+  try { r = await api("/api/skills"); } catch (e) { view.innerHTML = `<div class="card">${esc(e.message)}</div>`; return; }
+  SKILLS = r.report || {};
+  const pr = r.progress || {};
+  if (pr.running && !skillsBusy) { skillsBusy = true; pollSkills(); }
+  const d = SKILLS;
+  const local = d.local || {};
+  const all = d.skills || [];
+  const byId = Object.fromEntries(all.map(s => [s.id, s]));
+  const topIds = d.top || [];
+  const top = topIds.map(id => byId[id]).filter(Boolean);
+  const doList = all.filter(s => s.status === "do" && !s.ignored);
+  const later = all.filter(s => s.status === "later" && !s.ignored);
+  const installed = all.filter(s => s.installed || s.status === "installed");
+  const ignored = all.filter(s => s.ignored || s.status === "ignored");
+  const dups = d.duplicates || [], olds = d.obsolete || [];
+
+  const tabs = [
+    ["do", "可执行", doList.length], ["dup", "重复项", dups.length + (d.clusters || []).length],
+    ["old", "落后/建议删除", olds.length], ["installed", "已装", installed.length],
+    ["later", "暂缓", later.length], ["ignored", "已忽略", ignored.length],
+  ];
+  view.innerHTML = `
+    <div class="head"><div><h1>技能库</h1>
+      <div class="muted">只整理 AI 与学习类笔记，娱乐/美食/健身一律不碰；每条都校验过本地笔记与封面</div></div>
+      <span class="spacer"></span>
+      <button class="btn primary" id="skReview">${ico("sparkles")}重新审查</button></div>
+
+    <div class="sk-overview">
+      <div class="sk-stat"><b>${doList.length}</b><span>可执行</span></div>
+      <div class="sk-stat"><b>${dups.length}<em>+${(d.clusters || []).length}</em></b><span>真重复 + 同技能散落</span></div>
+      <div class="sk-stat"><b>${olds.length}</b><span>建议删除</span></div>
+      <div class="sk-stat"><b>${installed.length}</b><span>已装</span></div>
+      <div class="sk-stat sk-stat-wide"><span>上次审查：${skTime(d.reviewed_at)}</span>
+        <span>大脑：${esc(local.model || "未配")} ｜ 本机已装 ${(local.installed || []).length} 件 ｜ AI 笔记 ${local.ai_notes || 0} 条</span>
+        <span class="muted small" id="skOverviewStep">${pr.running ? "审查中：" + esc(pr.step || "") : (d.filtered_no_file ? "已过滤 " + d.filtered_no_file + " 条本地缺文件的笔记" : "本地文件全部校验通过")}</span></div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px"><b>本机全局情况（已脱敏）</b>
+      <div class="sk-local">
+        <div><span class="muted small">已装工具</span><div>${(local.installed || []).map(x => `<span class="chip gray">${esc(x)}</span>`).join(" ") || "未检测到"}</div></div>
+        <div><span class="muted small">主要分类</span><div>${Object.entries(local.top_cats || {}).map(([k, v]) => `<span class="chip gray">${esc(k)} ${v}</span>`).join(" ")}</div></div>
+        <div><span class="muted small">记忆库偏好（仅本机显示，不上传）</span><div class="muted small sk-prefs">${(local.prefs || []).slice(0, 3).map(x => esc(String(x).slice(0, 46))).join("<br>") || "未读取"}</div></div>
+      </div></div>
+
+    <div class="tabs" id="skTabs" style="margin-bottom:14px">
+      ${tabs.map(([v, l, n]) => `<button data-t="${v}" class="${skillsTab === v ? "on" : ""}">${l} ${n ? `<b>${n}</b>` : ""}</button>`).join("")}
+    </div>
+
+    <div id="skBody"></div>`;
+
+  const body = $("#skBody");
+  if (d.empty) {
+    body.innerHTML = `<div class="card"><h2>还没审查过</h2><p class="muted">点右上角「重新审查」，大脑会结合本机环境与记忆库，把已拆解的 AI/学习类笔记排成可执行清单。</p></div>`;
+  } else if (skillsTab === "do") {
+    body.innerHTML = `<div class="card" style="margin-bottom:14px"><b>优先建议先装 / 先做（前 ${top.length} 条）</b>
+      <div class="muted small">按优先级排序；已经装过、明确说「先别动」的都不在这里。</div></div>
+      ${top.map((s, i) => skCard(s, i + 1)).join("") || `<div class="card">暂时没有可执行的，点「重新审查」再跑一次。</div>`}
+      <div class="card" style="margin-top:18px"><b>其余可执行（${Math.max(0, doList.length - top.length)} 条，按优先级排）</b>
+        <div class="muted small">这些大脑没逐条点评，但同样是 AI/学习类里能直接动手的。</div></div>
+      <div class="sk-more">${doList.filter(s => !topIds.includes(s.id)).slice(0, 40)
+        .map(s => skCard(s, 0)).join("") || `<div class="card">没有更多了</div>`}</div>`;
+  } else if (skillsTab === "dup") {
+    const cl = d.clusters || [];
+    body.innerHTML = `<div class="card" style="margin-bottom:14px"><b>真重复（标题相同 / 内容几乎一样）</b>
+      <div class="muted small">这些是同一件事被存了多次，点开逐条看，自己决定留哪条，不会自动删。</div></div>
+      ${dups.slice(0, 40).map(skDupCard).join("") || `<div class="card">没有发现真重复</div>`}
+      <div class="card" style="margin:18px 0 14px"><b>同一个技能散落在多条笔记里（${cl.length}）</b>
+        <div class="muted small">不算重复，但内容被拆散了，可以照着合并看。</div></div>
+      ${cl.slice(0, 30).map(g => skDupCard({ kind: g.skill + "（" + g.total + " 条）", reason: g.reason, items: g.items })).join("") || `<div class="card">没有</div>`}`;
+  } else if (skillsTab === "old") {
+    body.innerHTML = `<div class="card" style="margin-bottom:14px"><b>落后 / 已被替代，建议删除</b>
+      <div class="muted small">只是候选，点「移入回收站」才会动，随时能恢复。</div></div>
+      ${olds.map(skOldCard).join("") || `<div class="card">没有发现明显过时的内容</div>`}`;
+  } else {
+    const list = skillsTab === "installed" ? installed : skillsTab === "later" ? later : ignored;
+    body.innerHTML = list.slice(0, 80).map(s => skCard(s, 0)).join("") || `<div class="card">这里是空的</div>`;
+  }
+
+  $$("#skTabs button").forEach(b => b.onclick = () => renderSkills(b.dataset.t));
+  $("#skReview").onclick = async () => {
+    const b = $("#skReview"); b.disabled = true; b.textContent = "审查中…";
+    try { await api("/api/skills/review", {}); skillsBusy = false; pollSkills(); }
+    catch (e) { toast(e.message, 4000); b.disabled = false; }
+  };
+
+  $$("#skBody [data-smark]").forEach(btn => btn.onclick = async () => {
+    const cur = byId[btn.dataset.smark];
+    const val = !(cur && cur[btn.dataset.field]);
+    await api("/api/skills/mark", { ids: [btn.dataset.smark], field: btn.dataset.field, value: val });
+    toast(val ? "已标记" : "已取消"); renderSkills(skillsTab);
+  });
+  $$("#skBody [data-sdel]").forEach(btn => btn.onclick = async () => {
+    if (!confirm("把这条移进回收站？（可恢复）")) return;
+    await api(`/api/items/${btn.dataset.sdel}/action`, { action: "delete" });
+    toast("已移入回收站"); renderSkills(skillsTab);
+  });
+}
+
+async function pollSkills() {
+  if (skillsBusy) return;
+  skillsBusy = true;
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    let r;
+    try { r = await api("/api/skills"); } catch (e) { break; }
+    if (!r.progress || !r.progress.running) {
+      skillsBusy = false;
+      toast("审查完成，清单已更新");
+      renderSkills(skillsTab);
+      return;
+    }
+  }
+  skillsBusy = false;
 }

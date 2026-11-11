@@ -16,7 +16,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, backup, bili, cache, cataudit, classify, config, db, deep, imgcache, douyin, douyin_actions, dsh, insights, llm, notes, ocr, recheck, transcribe, weekly, winfocus, xhs
+from . import __version__, backup, bili, cache, cataudit, classify, config, db, deep, imgcache, douyin, douyin_actions, dsh, insights, llm, notes, ocr, recheck, skills, transcribe, weekly, winfocus, xhs
 from .worker import Worker, scan_inbox
 
 _DEPS = None
@@ -710,6 +710,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"logged_in": bool(bili_login.logged_in())})
             except Exception:
                 return self._json({"logged_in": False})
+        if path == "/api/skills":
+            return self._json({"report": skills.report(), "progress": skills.progress()})
         if path == "/api/today":
             return self._json(db.today_summary())
         if path == "/api/cache":
@@ -1168,6 +1170,13 @@ class Handler(BaseHTTPRequestHandler):
             if not worker.state.get("busy"):
                 worker.submit("process")
             return self._json({"ok": True, "paused": False})
+        if path == "/api/skills/review":
+            ok = skills.review_async()
+            return self._json({"ok": True, "started": ok})
+        if path == "/api/skills/mark":
+            n = skills.mark(b.get("ids") or [], b.get("field") or "installed",
+                            bool(b.get("value", True)))
+            return self._json({"ok": True, "n": n})
         if path == "/api/bili/login":
             worker.submit("bili_login")
             return self._json({"ok": True, "msg": "已打开 B 站登录页，扫码即可"})

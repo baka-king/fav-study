@@ -987,3 +987,46 @@ iframe.mindmap { width: 100%; height: 540px; border: 0; border-radius: var(--r-c
 /* 侧栏底部主题按钮 */
 .side-foot .icon { width: 30px; height: 30px; border-radius: 9px; color: var(--ink-3); }
 .side-foot .icon:hover { background: var(--fill); color: var(--ink); }
+
+/* ======================================================== 技能库（普通文档流，禁止叠加） ======================================================== */
+.sk-overview { display: grid; grid-template-columns: repeat(4, 1fr) 2fr; gap: 12px; margin-bottom: 16px; }
+.sk-stat { background: var(--card); border-radius: var(--r-card); padding: 16px; display: flex;
+  flex-direction: column; gap: 4px; border: 1px solid var(--line); }
+.sk-stat b { font-size: 30px; line-height: 1.1; }
+.sk-stat span { color: var(--ink-3); font-size: 13px; }
+.sk-stat-wide { justify-content: center; gap: 6px; }
+.sk-local { display: grid; grid-template-columns: 1fr 1fr 1.6fr; gap: 14px; margin-top: 10px; }
+.sk-local > div { min-width: 0; }
+.sk-local .chip { margin: 2px 3px 2px 0; display: inline-block; }
+.sk-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 12px 14px; margin-bottom: 10px; }
+.sk-card.sk-old { border-color: color-mix(in srgb, var(--bad) 30%, var(--line)); }
+.sk-card.sk-dup { border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); }
+.sk-row { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto; gap: 14px; align-items: start; }
+.sk-cover { width: 56px; height: 56px; border-radius: 10px; overflow: hidden; flex: 0 0 56px;
+  display: grid; place-items: center; background: var(--fill); }
+.sk-cover img { width: 100%; height: 100%; object-fit: cover; }
+.sk-cover-ph { background: linear-gradient(135deg, var(--accent-soft), var(--fill)); color: var(--ink-2); }
+.sk-cover-ph b { font-size: 22px; }
+.sk-main { min-width: 0; }
+.sk-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 15px; }
+.sk-title b { font-weight: 650; }
+.sk-rank { margin-left: auto; color: var(--ink-4); font-size: 12px; }
+.sk-why { color: var(--ink-2); font-size: 13px; margin-top: 5px; line-height: 1.5; }
+.sk-act { color: var(--ink); font-size: 13px; margin-top: 5px; line-height: 1.5; }
+.sk-src { color: var(--ink-3); font-size: 12px; margin-top: 6px; line-height: 1.6;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-src a { color: var(--link); text-decoration: none; }
+.sk-src a:hover { text-decoration: underline; }
+.sk-btns { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.sk-more { margin-top: 10px; }
+@media (max-width: 900px) {
+  .sk-overview { grid-template-columns: repeat(2, 1fr); }
+  .sk-stat-wide { grid-column: 1 / -1; }
+  .sk-local { grid-template-columns: 1fr; }
+  .sk-row { grid-template-columns: 44px minmax(0, 1fr); }
+  .sk-cover { width: 44px; height: 44px; flex-basis: 44px; }
+  .sk-btns { grid-column: 1 / -1; flex-direction: row; justify-content: flex-end; }
+}
+.sk-stat b em { font-size: 15px; font-style: normal; color: var(--ink-3); margin-left: 4px; }
+.sk-prefs { line-height: 1.7; max-height: 96px; overflow: hidden; }
