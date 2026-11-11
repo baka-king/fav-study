@@ -311,12 +311,17 @@ class Browser:
                 continue
         return False
 
-    def ensure_login(self, timeout=300, should_stop=lambda: False, qr_path=None):
-        self.start(visible=True)
+    def ensure_login(self, timeout=300, should_stop=lambda: False, qr_path=None, visible=False):
+        """visible=False（默认）：后台只检查登录态，不把窗口弹出来。
+        visible=True：用户主动点「登录小红书」时才用。"""
+        self.start(visible=visible)
         if not any(h in (self.page.url or "") for h in ("xiaohongshu.com", "rednote.com")):
             self.page.goto(HOME, wait_until="domcontentloaded", timeout=60000)
         if self.logged_in():
             return True
+        if not visible:
+            self.log("小红书登录已失效（后台模式不弹窗），请在界面点「登录小红书」重新扫码")
+            return False
         # 把登录二维码点出来：首页不点登录是不会弹二维码的
         for sel in ("button:has-text(\"登录\")", "text=\"登录\"", ".login-btn"):
             try:
@@ -334,9 +339,9 @@ class Browser:
                 return False
             try:
                 if self.page is None or self.page.is_closed():
-                    self.start(visible=True)
+                    self.start(visible=visible)
             except Exception:
-                self.start(visible=True)
+                self.start(visible=visible)
             if qr_path:
                 try:
                     self.save_qr(qr_path)
@@ -354,7 +359,7 @@ class Browser:
             except Exception:
                 time.sleep(2)
                 try:
-                    self.start(visible=True)
+                    self.start(visible=visible)
                 except Exception:
                     pass
         raise NotLoggedIn("等了 5 分钟还没登录小红书")

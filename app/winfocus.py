@@ -42,7 +42,10 @@ def focus(title="收藏变笔记"):
 
     found = []
 
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    u.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]   # 不声明的话回调指针会被截断，枚举一个都拿不到
+
+    @WNDENUMPROC
     def _cb(h, _l):
         n = u.GetWindowTextLengthW(h)
         if not n:
@@ -121,6 +124,14 @@ def hide_browser_taskbar(port=9333):
         return 0
 
     u = ctypes.windll.user32
+    # 64 位句柄必须声明类型，否则 EnumWindows 里传进去的 hwnd 会被截成 32 位，永远匹配不到
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    u.GetWindowLongW.restype = ctypes.c_long
+    u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, wintypes.UINT]
     GWL_EXSTYLE = -20
     WS_EX_TOOLWINDOW = 0x00000080
     WS_EX_APPWINDOW = 0x00040000

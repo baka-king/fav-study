@@ -286,7 +286,8 @@ class Browser:
                 self.ctx.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
                 self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
-                self.log(f"已打开浏览器（{ {'msedge': 'Edge', 'chrome': 'Chrome', 'chromium': '内置 Chromium'}[ch] }）")
+                self.log("后台浏览器已就绪（%s，窗口不显示）" %
+                         {'msedge': 'Edge', 'chrome': 'Chrome', 'chromium': '内置 Chromium'}[ch])
                 if not self.visible:
                     # 后台模式：窗口已经在屏幕外了，再从任务栏/Alt-Tab 里藏掉，别打扰你
                     try:
@@ -348,12 +349,18 @@ class Browser:
         except Exception:
             return ""
 
-    def ensure_login(self, timeout=300, should_stop=lambda: False):
-        self.start(visible=True)   # 扫码要有窗口，这里切回可见
+    def ensure_login(self, timeout=300, should_stop=lambda: False, visible=False):
+        """visible=False（默认）：后台只检查登录态，绝不把窗口弹到用户面前。
+        visible=True：只在用户主动点「登录抖音」时用，这时才需要扫码。"""
+        self.start(visible=visible)
         if not self.page.url.startswith("https://www.douyin.com"):
             self.page.goto("https://www.douyin.com/", wait_until="domcontentloaded", timeout=60000)
         if self.logged_in():
             return True
+        if not visible:
+            # 后台自动流程：不弹窗、不干等，交给上层提示用户手动登录
+            self.log("抖音登录已失效（后台模式不弹窗），请在界面点「登录抖音」重新扫码")
+            return False
         self.log("请在弹出的浏览器窗口里用抖音 App 扫码登录（右上角「登录」）。最多等 5 分钟……"
                  "（如果没看到窗口，检查一下任务栏，可能被其它窗口挡住了）")
         try:
@@ -521,7 +528,8 @@ class Browser:
         limit = 0 表示不设上限，一直读到列表到底（has_more 为 false）为止。
         """
         cap = limit if limit and limit > 0 else 10 ** 9
-        self.ensure_login(should_stop=should_stop)
+        if not self.ensure_login(should_stop=should_stop):
+            raise NotLoggedIn("抖音登录已失效，请在界面点「登录抖音」重新扫码")
         if kind == "like":
             tab_url, tab_text = "https://www.douyin.com/user/self?showTab=like", "喜欢"
             match = lambda u: "/aweme/v1/web/aweme/favorite" in u

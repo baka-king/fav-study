@@ -220,7 +220,7 @@ class Worker:
                 elif cmd == "process":
                     self._process_all()
                 elif cmd == "login":
-                    self._browser().ensure_login(should_stop=self.stopping)
+                    self._browser().ensure_login(should_stop=self.stopping, visible=True)
                 elif cmd == "sync":
                     self._sync(kw.get("kind", "collection"), kw.get("limit", 50), kw.get("then_process", True))
                 elif cmd == "xhs_login":
@@ -231,7 +231,7 @@ class Worker:
                     except Exception:
                         pass
                     xb = self._xhs(visible=False)
-                    ok = xb.ensure_login(should_stop=self.stopping, qr_path=qr)
+                    ok = xb.ensure_login(should_stop=self.stopping, qr_path=qr, visible=True)
                     xb.hide()      # 登录窗口用完就收起来，别一直摆在桌面上
                     if ok and kw.get("sync"):
                         self._sync_xhs(kw.get("limit", 50), True)
