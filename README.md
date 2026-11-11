@@ -4,7 +4,7 @@
 
 一个跑在自己电脑上的 Windows 桌面应用：同步收藏 → 下载视频/图片 → 本地转文字或识别画面文字 → AI 提炼成笔记 → 自动分类。**所有数据都在本机**，笔记是可被 Obsidian 直接打开的 Markdown 文件。
 
-> 本仓库是改进版。原始版本与需求来自 **@baka-king**；后续的功能扩展与重构由 AI 协作完成（见「原作者与改进」）。
+> 本项目由 **@baka-king** 在原版基础上改进与维护。原始版本：[@yuanshengbo8-sketch/douyin-fav-study](https://github.com/yuanshengbo8-sketch/douyin-fav-study)，按 `LICENSE.md` 的 PolyForm Noncommercial 1.0.0 保留原署名。
 
 ---
 
@@ -104,9 +104,11 @@ python -m app --no-browser :: 只起服务，浏览器自己开 http://127.0.0.1
 
 ---
 
-## 原作者与改进
+## 原始版本与改进
 
-**原作者**：baka-king（原始版本、产品需求与设计方向）
+- **改进与维护**：[@baka-king](https://github.com/baka-king)
+- **原始版本**：[@yuanshengbo8-sketch/douyin-fav-study](https://github.com/yuanshengbo8-sketch/douyin-fav-study)
+  （`LICENSE.md` 的 Required Notice 要求保留此署名）
 
 **本版改进**（在原版基础上）：
 
