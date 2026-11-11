@@ -3297,6 +3297,8 @@ function skCard(s, rank) {
         <div class="sk-title"><b>${esc(s.name)}</b>${rank === 1 ? `<span class="chip teal">今天就做这个</span>` : ""}
           ${s.status === "later" ? `<span class="chip gray">暂缓</span>` : `<span class="chip ${p >= 4 ? "warn" : "gray"}">P${p}</span>`}
           <span class="chip gray">${esc(s.category)}</span>
+          ${(() => { const q = s.platform || "通用"; const cls = q === "dsh" ? "sk-plat-dsh" : q === "workbuddy" ? "sk-plat-wb" : q === "不适用" ? "bad" : "gray";
+            return `<span class="chip ${cls}">${esc(q === "dsh" ? "DSH" : q === "workbuddy" ? "WorkBuddy" : q)}</span>`; })()}
           ${s.already ? `<span class="chip teal">已装</span>` : ""}
           ${s.learned ? `<span class="chip teal">已学</span>` : ""}
           ${s.n > 1 ? `<span class="chip gray">${s.n} 条笔记</span>` : ""}
@@ -3373,19 +3375,30 @@ async function renderSkills(tab) {
       <span class="spacer"></span>
       <button class="btn primary" id="skReview">${ico("sparkles")}重新审查</button></div>
 
+    <div class="card sk-plat">
+      <div class="sk-plat-main"><b>我实际在用的平台</b>
+        <div class="muted small">推荐只落到这些平台上；PATH 里探测到但你不用的工具会自动排除</div></div>
+      <input id="skPlatInput" class="sk-plat-input" value="${esc((local.active_platforms || ["dsh", "workbuddy"]).join(", "))}" spellcheck="false" />
+      <button class="btn primary sm" id="skPlatSave">保存并重审</button>
+      <div class="muted small sk-plat-path">PATH 探测到（不作推荐依据）：${(local.installed || []).map(x => esc(x)).join("、") || "无"}</div>
+    </div>
+
     <div class="sk-overview">
       <div class="sk-stat"><b>${doList.length}</b><span>可执行</span></div>
       <div class="sk-stat"><b>${dups.length}<em>+${(d.clusters || []).length}</em></b><span>真重复 + 同技能散落</span></div>
       <div class="sk-stat"><b>${olds.length}</b><span>建议删除</span></div>
       <div class="sk-stat"><b>${installed.length}</b><span>已装</span></div>
       <div class="sk-stat sk-stat-wide"><span>上次审查：${skTime(d.reviewed_at)}</span>
-        <span>大脑：${esc(local.model || "未配")} ｜ 本机已装 ${(local.installed || []).length} 件 ｜ AI 笔记 ${local.ai_notes || 0} 条</span>
+        <span>大脑：${esc(local.model || "未配")} ｜ 实际在用 ${(local.active_platforms || []).length} 个平台 ｜ AI 笔记 ${local.ai_notes || 0} 条</span>
         <span class="muted small" id="skOverviewStep">${pr.running ? "审查中：" + esc(pr.step || "") : (d.filtered_no_file ? "已过滤 " + d.filtered_no_file + " 条本地缺文件的笔记" : "本地文件全部校验通过")}</span></div>
     </div>
 
     <div class="card" style="margin-bottom:16px"><b>本机全局情况（已脱敏）</b>
       <div class="sk-local">
-        <div><span class="muted small">已装工具</span><div>${(local.installed || []).map(x => `<span class="chip gray">${esc(x)}</span>`).join(" ") || "未检测到"}</div></div>
+        <div><span class="muted small">实际在用（推荐依据）</span>
+          <div>${(local.active_platforms || []).map(x => `<span class="chip teal">${esc(x)}</span>`).join(" ") || "未设置"}</div>
+          <span class="muted small" style="display:block;margin-top:8px">PATH 探测到（不参与推荐）</span>
+          <div>${(local.installed || []).map(x => `<span class="chip gray">${esc(x)}</span>`).join(" ") || "无"}</div></div>
         <div><span class="muted small">主要分类</span><div>${Object.entries(local.top_cats || {}).map(([k, v]) => `<span class="chip gray">${esc(k)} ${v}</span>`).join(" ")}</div></div>
         <div><span class="muted small">记忆库偏好（仅本机显示，不上传）</span><div class="muted small sk-prefs">${(local.prefs || []).slice(0, 3).map(x => esc(String(x).slice(0, 46))).join("<br>") || "未读取"}</div></div>
       </div></div>
@@ -3400,11 +3413,21 @@ async function renderSkills(tab) {
   if (d.empty) {
     body.innerHTML = `<div class="card"><h2>还没审查过</h2><p class="muted">点右上角「重新审查」，大脑会结合本机环境与记忆库，把已拆解的 AI/学习类笔记排成可执行清单。</p></div>`;
   } else if (skillsTab === "do") {
-    body.innerHTML = `<div class="card" style="margin-bottom:14px"><b>优先建议先装 / 先做（前 ${top.length} 条）</b>
-      <div class="muted small">按优先级排序；已经装过、明确说「先别动」的都不在这里。</div></div>
-      ${top.map((s, i) => skCard(s, i + 1)).join("") || `<div class="card">暂时没有可执行的，点「重新审查」再跑一次。</div>`}
+    const groups = [
+      ["dsh", "DSH · 多 Agent / 插件 / MCP / 会话"],
+      ["workbuddy", "WorkBuddy · 账号池 / 日报 / 自动化"],
+      ["通用", "通用 · 两个平台都能用"],
+    ];
+    const rank = new Map(top.map((s, i) => [s.id, i + 1]));
+    body.innerHTML = `<div class="card" style="margin-bottom:14px"><b>优先建议（前 ${top.length} 条，按平台分类）</b>
+      <div class="muted small">组内按优先级 P5→P1 排；# 是总榜名次。不在实际平台上的技能已自动移到「暂缓」。</div></div>
+      ${groups.map(([q, label]) => {
+        const items = top.filter(s => (s.platform || "通用") === q);
+        return `<div class="sk-group"><b>${label}</b><span class="muted small">${items.length} 条</span></div>` +
+          (items.length ? items.map(s => skCard(s, rank.get(s.id))).join("") : `<div class="card muted small">这一组暂时没有优先建议</div>`);
+      }).join("") || `<div class="card">暂时没有可执行的，点「重新审查」再跑一次。</div>`}
       <div class="card" style="margin-top:18px"><b>其余可执行（${Math.max(0, doList.length - top.length)} 条，按优先级排）</b>
-        <div class="muted small">这些大脑没逐条点评，但同样是 AI/学习类里能直接动手的。</div></div>
+        <div class="muted small">这些大脑没逐条点评，但同样能直接动手。</div></div>
       <div class="sk-more">${doList.filter(s => !topIds.includes(s.id)).slice(0, 40)
         .map(s => skCard(s, 0)).join("") || `<div class="card">没有更多了</div>`}</div>`;
   } else if (skillsTab === "dup") {
@@ -3425,6 +3448,18 @@ async function renderSkills(tab) {
   }
 
   $$("#skTabs button").forEach(b => b.onclick = () => renderSkills(b.dataset.t));
+  const pSave = $("#skPlatSave");
+  if (pSave) pSave.onclick = async () => {
+    const val = ($("#skPlatInput").value || "").split(/[,，\s]+/).filter(Boolean);
+    pSave.disabled = true; pSave.textContent = "重审中…";
+    try {
+      await api("/api/skills/platforms", { platforms: val });
+      await api("/api/skills/review", {});
+      skillsBusy = false;
+      toast("平台已保存，正在按新平台重新审查");
+      pollSkills();
+    } catch (e) { toast(e.message, 4000); pSave.disabled = false; pSave.textContent = "保存并重审"; }
+  };
   $("#skReview").onclick = async () => {
     const b = $("#skReview"); b.disabled = true; b.textContent = "审查中…";
     try { await api("/api/skills/review", {}); skillsBusy = false; pollSkills(); }

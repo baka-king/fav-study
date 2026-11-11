@@ -17,6 +17,9 @@ from pathlib import Path
 from . import config, db, llm
 
 FILE = config.DATA / "skills.json"
+PFILE = config.DATA / "skills_platforms.json"
+DEFAULT_PLATFORMS = ["dsh", "workbuddy"]
+PLATFORM_LABELS = {"dsh": "DSH", "workbuddy": "WorkBuddy", "通用": "通用", "不适用": "不适用"}
 CATS = ("AI 编程", "AI 工具推荐", "提示词技巧", "AI 办公效率", "AI 副业与变现",
         "AI 绘画与视频", "大模型与行业资讯", "AI 学习方法", "学习与成长")
 
@@ -31,6 +34,52 @@ PROBES = {
     "VS Code": ["code"], "Docker": ["docker"], "Obsidian": ["obsidian"],
 }
 NL = chr(10)
+
+
+def get_platforms():
+    """用户「实际在用」的平台；PATH 里探测到不算。"""
+    try:
+        v = [str(x).strip().lower() for x in
+             (json.loads(PFILE.read_text(encoding="utf-8")).get("platforms") or []) if str(x).strip()]
+        return v or list(DEFAULT_PLATFORMS)
+    except Exception:
+        return list(DEFAULT_PLATFORMS)
+
+
+def set_platforms(value):
+    out = []
+    for x in (value or []):
+        x = str(x).strip().lower()
+        if x and x not in out and re.fullmatch(r"[\w一-鿿.+-]{1,24}", x):
+            out.append(x)
+    PFILE.parent.mkdir(parents=True, exist_ok=True)
+    PFILE.write_text(json.dumps({"platforms": out or list(DEFAULT_PLATFORMS)},
+                                ensure_ascii=False, indent=1), encoding="utf-8")
+    return get_platforms()
+
+
+# 平台归类：dsh / workbuddy / 通用 / 不适用
+P_DSH = ("dsh", "harness", "deepseek harness", "子 agent", "多 agent", "多子", "子会话",
+         "agent 编排", "插件", "skill", "mcp", "cli ", "命令行", "破甲", "模型路由", "多会话")
+P_WB = ("workbuddy", "账号池", "网关", "日报", "积分", "外派", "面板", "dashboard",
+        "定时任务", "自动刷", "批量账号", "转发", "多账号")
+P_OUT = ("codex", "claude code", "claude", "cursor", "windsurf", "vscode", "vs code",
+         "jetbrains", "cline", "roo code", "aider")
+
+
+def platform_of(name, text=""):
+    t = (str(name or "") + " " + str(text or "")).lower()
+    if any(k in t for k in P_OUT):
+        return "不适用"
+    d = any(k in t for k in P_DSH)
+    w = any(k in t for k in P_WB)
+    if d and w:
+        return "通用"
+    if d:
+        return "dsh"
+    if w:
+        return "workbuddy"
+    return "通用"
 
 
 def _lib() -> Path:
@@ -91,7 +140,8 @@ def _local_state():
         if m:
             prefs.append("已装软件：" + m.group(1).strip())
     return {
-        "installed": installed,
+        "installed": installed,  # PATH 探测结果，仅展示，不作为推荐依据
+        "active_platforms": get_platforms(),
         "model": (s.get("model") or "").strip(),
         "provider": (s.get("provider") or "").strip(),
         # focus 只保留与 AI/学习有关的部分：健身、美食、穿搭不进提示词
@@ -184,6 +234,10 @@ def collect():
             "learned": any(x[0]["learned"] for x in pairs),
             "date": max((x[0].get("published_at") or x[0].get("created_at") or 0) for x in pairs),
         })
+    for s in skills:
+        s["platform"] = platform_of(s["name"], s.get("use") or "")
+        s["generic"] = (len(_norm(s["name"])) < 3 or _norm(s["name"]) in {
+            "ai", "aigc", "工具", "教程", "方法", "抖音", "微信", "小红书", "网站", "软件", "模型", "平台"})
     skills.sort(key=lambda s: (-int(s["learned"]), -s["n"], -s["date"]))
     return skills
 
@@ -321,11 +375,20 @@ def _brain(skills, local, log=print):
            "每条给 priority(1-5，5最高)、why(一句话，结合他的情况)、action(具体下一步)。" + NL +
            "边界：action 只能是 AI 工具/编程/提示词/学习类动作；不要建议健身、健康、饮食、睡眠、穿搭、摄影器材；" +
            "不要引用任何健康或财务数据。" + NL +
-           '只输出 JSON：{"items":[{"id":"...","priority":5,"why":"...","action":"...","obsolete":false}]}' + NL + NL +
+           "平台说明：dsh = 多 Agent / 插件 / MCP / 子会话 / 模型路由的工作台；" +
+           "workbuddy = 账号池网关、日报、外派任务、定时任务与面板的自动化工作台。" + NL +
+           "平台：本机【实际在用】的平台只有 active_platforms 里的那些；installed 只是 PATH 探测结果，" +
+           "不算你在用。禁止建议安装/配置 Codex、Claude Code、Cursor、VS Code 等其它工具。" +
+           "每条给 platform（只能是 dsh / workbuddy / 通用 / 不适用 之一）；" +
+           "不适用当前平台的技能 priority=1 并在 why 里写明原因；action 必须能在当前平台上落地。" + NL +
+           '只输出 JSON：{"items":[{"id":"...","priority":5,"why":"...","action":"...","platform":"dsh","obsolete":false}]}' + NL + NL +
            "【本机全局情况】" + json.dumps(local, ensure_ascii=False)[:1200] + NL + NL)
     out = {}
     batch_size = 14
-    top = skills[:70]
+    rank = {"dsh": 0, "workbuddy": 0, "通用": 1, "不适用": 3}
+    cand = [s for s in skills if s.get("platform") != "不适用" and not s.get("generic")]
+    cand.sort(key=lambda s: (rank.get(s.get("platform"), 2), -s["n"], -int(s["learned"])))
+    top = cand[:70]
     for i in range(0, len(top), batch_size):
         batch = top[i:i + batch_size]
         digest = [{"id": s["id"], "name": s["name"], "cat": s["category"], "n": s["n"],
@@ -339,14 +402,37 @@ def _brain(skills, local, log=print):
     return out
 
 
+def _pick_top(do, active, k=24):
+    """总榜：先按优先级，再给每个实际平台保底 2 条，避免某个平台分组是空的。"""
+    picked = []
+    for p in active:
+        for s in [x for x in do if x.get("platform") == p][:2]:
+            if s not in picked:
+                picked.append(s)
+    for s in do:
+        if len(picked) >= k:
+            break
+        if s not in picked:
+            picked.append(s)
+    picked.sort(key=lambda x: (-int(x.get("priority") or 0), -int(x.get("learned") or 0), -int(x.get("n") or 0)))
+    return [x["id"] for x in picked[:k]]
+
+
 def review(log=print):
     """审查一次并落盘。每次都重新读本机全局情况。"""
     local = _local_state()
     skills = collect()
     brain = _brain(skills, local, log=log)
-    installed = {x.lower() for x in local["installed"]}
+    active = set(local.get("active_platforms") or DEFAULT_PLATFORMS)
+    # 只有「实际在用」的平台算已装；PATH 里的 codex/claude 不算
+    installed = set(active)
     for s in skills:
         v = brain.get(s["id"]) or {}
+        plat = str(v.get("platform") or "").strip()
+        if plat not in PLATFORM_LABELS:
+            plat = platform_of(s["name"], s.get("use") or "")
+        s["platform"] = plat
+        s["platform_src"] = "brain" if str(v.get("platform") or "").strip() in PLATFORM_LABELS else "local"
         s["why"] = str(v.get("why") or "")[:160]
         s["action"] = str(v.get("action") or "")[:160]
         s["obsolete"] = bool(v.get("obsolete"))
@@ -360,8 +446,15 @@ def review(log=print):
         s["skip"] = bool(re.search(r"跳过|不部署|不必|没增量|为零|偏离|先不|不建议|不要单独|没有边际收益", neg))
         if s["skip"]:
             s["priority"] = 1
+        # 不在实际平台上的，或建议里偷偷让人装 Codex/Claude Code 的，一律归暂缓
+        if s["platform"] == "不适用" or re.search(
+                r"codex|claude code|cursor|vs ?code|windsurf", neg, re.I):
+            s["priority"] = 1
+            s["skip"] = True
+            if not s["why"]:
+                s["why"] = "依赖其它平台的工具，本机实际在用 " + "、".join(sorted(active)) + "，先不做"
         if not s["priority"]:
-            s["priority"] = min(5, 2 + min(2, s["n"] // 3) + int(s["learned"]) - int(s["already"]))
+            s["priority"] = 1 if s["platform"] == "不适用" else                 min(5, 2 + min(2, s["n"] // 3) + int(s["learned"]) - int(s["already"]))
             if not s["why"]:
                 s["why"] = "在 %d 条笔记里出现" % s["n"] + ("，且你已学过" if s["learned"] else "")
             if not s["action"]:
@@ -378,11 +471,12 @@ def review(log=print):
             s["status"] = "later"
         else:
             s["status"] = "do"
-    do = sorted([s for s in skills if s["status"] == "do"],
+    do = sorted([s for s in skills if s["status"] == "do" and s.get("platform") != "不适用"
+                 and not s.get("generic")],
                 key=lambda x: (-x["priority"], -int(x["learned"]), -x["n"]))
     data = {
         "reviewed_at": time.time(), "local": local,
-        "top": [x["id"] for x in do[:24]],
+        "top": _pick_top(do, local.get("active_platforms") or DEFAULT_PLATFORMS),
         "skills": skills, "duplicates": _dup_groups(), "clusters": clusters(),
         "obsolete": _old_candidates(_rows()),
         "filtered_no_file": sum(1 for r in _rows() if not r["md_ok"]),
@@ -407,6 +501,27 @@ def refresh_local():
     d["duplicates"] = _dup_groups()
     d["clusters"] = clusters()
     d["obsolete"] = _old_candidates(_rows())
+    # 旧缓存补齐平台字段：不在实际在用平台上的立即移出可执行清单
+    active = set(d["local"].get("active_platforms") or DEFAULT_PLATFORMS)
+    for s in d.get("skills") or []:
+        if not s.get("platform_src") == "brain":
+            s["platform"] = platform_of(s["name"], s.get("use") or "")
+        s["generic"] = (len(_norm(s["name"])) < 3 or _norm(s["name"]) in {
+            "ai", "aigc", "工具", "教程", "方法", "抖音", "微信", "小红书", "网站", "软件", "模型", "平台"})
+        if s["platform"] == "不适用" or re.search(
+                r"codex|claude code|cursor|vs ?code|windsurf",
+                (s.get("action") or "") + " " + (s.get("why") or ""), re.I):
+            s["priority"] = 1
+            s["skip"] = True
+            s["status"] = "later"
+            if not s.get("why"):
+                s["why"] = "依赖其它平台的工具，本机实际在用 " + "、".join(sorted(active)) + "，先不做"
+        elif s.get("status") == "later" and not s.get("skip") and not s.get("ignored"):
+            s["status"] = "do"
+    desc = sorted([s for s in d["skills"] if s.get("status") == "do" and s.get("platform") != "不适用"
+                   and not s.get("generic")],
+                  key=lambda x: (-int(x.get("priority") or 0), -int(x.get("learned") or 0), -int(x.get("n") or 0)))
+    d["top"] = _pick_top(desc, d["local"].get("active_platforms") or DEFAULT_PLATFORMS)
     d["reviewed_at_local"] = time.time()
     for s in d.get("skills") or []:
         if s.get("obsolete") and s["id"] not in {o["id"] for o in d["obsolete"]}:

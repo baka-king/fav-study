@@ -1173,6 +1173,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/skills/review":
             ok = skills.review_async()
             return self._json({"ok": True, "started": ok})
+        if path == "/api/skills/platforms":
+            plats = skills.set_platforms(b.get("platforms") or [])
+            skills.refresh_local()
+            return self._json({"ok": True, "platforms": plats})
         if path == "/api/skills/mark":
             n = skills.mark(b.get("ids") or [], b.get("field") or "installed",
                             bool(b.get("value", True)))
