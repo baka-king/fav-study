@@ -46,7 +46,7 @@ def _setup_log():
         pass
 
 
-def _msgbox(text, title="收藏学习台"):
+def _msgbox(text, title="收藏变笔记"):
     if sys.platform != "win32":
         return
     try:
@@ -146,7 +146,7 @@ def _open_only(port):
     print(f"  打开方式：{how}", flush=True)
     if not ok:
         _msgbox(f"窗口没能打开。\n\n请手动在浏览器访问 http://127.0.0.1:{port}/\n"
-                "详细记录见 data\\app.log", "收藏学习台")
+                "详细记录见 data\\app.log", "收藏变笔记")
     time.sleep(1.5)
     return _probe(port, 2.5)
 
@@ -296,7 +296,7 @@ def main():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        _msgbox(f"启动失败：{e}\n\n详细信息见 data\\app.log", "收藏学习台 打不开")
+        _msgbox(f"启动失败：{e}\n\n详细信息见 data\\app.log", "收藏变笔记 打不开")
 
 
 if __name__ == "__main__":

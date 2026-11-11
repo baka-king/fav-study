@@ -40,7 +40,7 @@ def create(include_keys=True, dest_dir=None, tag="备份"):
     """生成备份文件，返回路径。"""
     dest_dir = Path(dest_dir or tempfile.mkdtemp(prefix="dsbk-"))
     dest_dir.mkdir(parents=True, exist_ok=True)
-    path = dest_dir / f"收藏学习台{tag}-{_stamp()}.zip"
+    path = dest_dir / f"收藏变笔记{tag}-{_stamp()}.zip"
     lib = config.library_dir()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -58,7 +58,7 @@ def create(include_keys=True, dest_dir=None, tag="备份"):
         stats = db.stats()
         note_files = [f for f in sorted(lib.rglob("*")) if f.is_file() and not f.name.startswith(".")] if lib.exists() else []
         manifest = {
-            "app": "收藏学习台", "format": FORMAT_VERSION, "created_at": time.time(),
+            "app": "收藏变笔记", "format": FORMAT_VERSION, "created_at": time.time(),
             "created": time.strftime("%Y-%m-%d %H:%M"), "items": stats["total"],
             "done": stats["by_status"].get("done", 0), "learned": stats["learned"],
             "library_dir": str(lib), "has_keys": bool(include_keys and (s.get("api_key") or s.get("deep_api_key"))),
@@ -82,15 +82,15 @@ def inspect(zip_path):
     with z:
         names = set(z.namelist())
         if "manifest.json" not in names or "library.db" not in names:
-            raise BackupError("这不是收藏学习台的备份文件（缺少 manifest.json 或 library.db）")
+            raise BackupError("这不是收藏变笔记的备份文件（缺少 manifest.json 或 library.db）")
         try:
             m = json.loads(z.read("manifest.json").decode("utf-8"))
         except Exception:
             raise BackupError("备份文件里的 manifest.json 坏了")
-        if m.get("app") != "收藏学习台":
-            raise BackupError("这不是收藏学习台的备份文件")
+        if m.get("app") not in ("收藏变笔记", "收藏学习台"):  # 兼容改名前的备份
+            raise BackupError("这不是收藏变笔记的备份文件")
         if int(m.get("format", 0)) > FORMAT_VERSION:
-            raise BackupError("这个备份来自更新版本的收藏学习台，请先更新程序再恢复")
+            raise BackupError("这个备份来自更新版本的收藏变笔记，请先更新程序再恢复")
         total = sum(i.file_size for i in z.infolist())
         if total > MAX_UNPACKED:
             raise BackupError("备份文件解压后太大，已拒绝")

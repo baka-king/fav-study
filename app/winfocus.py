@@ -12,7 +12,7 @@ class _RECT:
     pass
 
 
-def focus(title="收藏学习台"):
+def focus(title="收藏变笔记"):
     """返回 (找到窗口, 是否还原/激活成功)。"""
     if sys.platform != "win32":
         return False, False

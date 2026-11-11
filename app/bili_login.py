@@ -35,7 +35,7 @@ def logged_in() -> bool:
 
 
 def _netscape(cookies) -> str:
-    lines = ["# Netscape HTTP Cookie File", "# 由收藏学习台自动生成，用于 yt-dlp 下载 B 站视频", ""]
+    lines = ["# Netscape HTTP Cookie File", "# 由收藏变笔记自动生成，用于 yt-dlp 下载 B 站视频", ""]
     for c in cookies or []:
         dom = (c.get("domain") or "")
         if "bilibili" not in dom and "b23" not in dom:

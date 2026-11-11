@@ -1,4 +1,4 @@
-/* 收藏学习台 前端（原生 JS，不需要编译） */
+/* 收藏变笔记 前端（原生 JS，不需要编译） */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -1830,7 +1830,7 @@ async function renderWelcome() {
     <div class="welcome">
       <div class="welcome-hero">
         <div class="mark big">书</div>
-        <h1>收藏学习台</h1>
+        <h1>收藏变笔记</h1>
         <p class="muted">把抖音、小红书、B站的收藏，自动变成能读、能学、能复习的笔记。</p>
       </div>
 
@@ -2656,10 +2656,10 @@ async function renderSettings() {
   };
   $("#dPromptReset").onclick = () => { $("#dPrompt").value = s.default_deep_prompt; };
   $("#quitBtn").onclick = async () => {
-    if (!confirm("确定退出收藏学习台？\n\n后台任务会停住，进度都保留，下次打开会从队列继续。")) return;
+    if (!confirm("确定退出收藏变笔记？\n\n后台任务会停住，进度都保留，下次打开会从队列继续。")) return;
     try { await api("/api/quit", {}); } catch (e) {}
     document.body.innerHTML = `<div style="display:grid;place-items:center;height:100vh;text-align:center;gap:8px">
-      <div><h2 style="margin:0 0 6px">收藏学习台已退出</h2>
+      <div><h2 style="margin:0 0 6px">收藏变笔记已退出</h2>
       <p class="muted">这个窗口可以直接关掉；下次双击桌面图标就会重新启动。</p></div></div>`;
   };
   $("#dTest").onclick = async () => {

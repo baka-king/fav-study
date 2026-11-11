@@ -325,7 +325,7 @@ def _copy_to_clipboard(text: str) -> bool:
         return False
 
 
-def _notify(msg, title="收藏学习台"):
+def _notify(msg, title="收藏变笔记"):
     """弹一个系统提示框。窗口开不出来时至少让用户知道程序在跑。"""
     if platform.system() != "win32":
         print(msg, flush=True)
@@ -1521,7 +1521,7 @@ def serve(port=8765, open_browser=True):
     threading.Thread(target=srv.serve_forever, daemon=True, name="http").start()
     url = f"http://127.0.0.1:{port}/"
     print("=" * 56)
-    print(f"  收藏学习台 v{__version__} 已启动")
+    print(f"  收藏变笔记 v{__version__} 已启动")
     print(f"  窗口地址：{url}")
     print(f"  临时目录：{tmp}")
     print("  关掉窗口后仍在后台继续处理；要彻底退出，请到「设置」里点「退出程序」")
