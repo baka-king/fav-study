@@ -568,6 +568,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
         pu, pts = item.get("play_url"), item.get("play_url_ts") or 0
         if pu and time.time() - float(pts) < 6 * 3600:
+            # 第一次点开是网络流；顺手在后台存一份，下次点开就秒开
+            self._warm_cache(item["id"], pu, config.MEDIA_DIR / f"{aweme_id}.mp4")
             return self._proxy_media(pu)
         if (item.get("platform") or "douyin") == "xhs":
             key = "xhs:" + aweme_id
@@ -590,6 +592,38 @@ class Handler(BaseHTTPRequestHandler):
             if not url:
                 return self._err("取不到播放地址（视频可能已删除，或在浏览器里需要过一下验证）", 404)
         return self._proxy_media(url)
+
+    _warming = set()
+    _warming_lock = threading.Lock()
+
+    def _warm_cache(self, item_id, url, dest):
+        """点开视频时在后台悄悄存一份，不拖慢这次播放。"""
+        if dest.is_file() and dest.stat().st_size > 10240:
+            return
+        try:
+            if cache.all_state().get("on"):
+                return          # 全量缓存正在跑，别和它抢同一个文件
+        except Exception:
+            pass
+        with Handler._warming_lock:
+            if item_id in Handler._warming:
+                return
+            Handler._warming.add(item_id)
+
+        def job():
+            try:
+                cache.download([url], dest, item_id=item_id,
+                               referer="https://www.douyin.com/")
+            except Exception:
+                pass
+            finally:
+                try:
+                    dest.with_suffix(dest.suffix + ".part").unlink(missing_ok=True)
+                except Exception:
+                    pass
+                with Handler._warming_lock:
+                    Handler._warming.discard(item_id)
+        threading.Thread(target=job, daemon=True, name="warm-video").start()
 
     def _proxy_media(self, url):
         headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://www.douyin.com/"}

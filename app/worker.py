@@ -430,7 +430,13 @@ class Worker:
         ok = False
         try:
             cache.all_current(it.get("title") or aid)
-            if (it.get("platform") or "douyin") == "xhs":
+            if (it.get("platform") or "") == "bili":
+                # B 站用自己的下载器（yt-dlp），别拿 BV 号去问抖音
+                from . import bili
+                bili.download_video(aid, config.MEDIA_DIR, log=self.log)
+                urls, referer = [], "https://www.bilibili.com/"
+                ok = True
+            elif (it.get("platform") or "douyin") == "xhs":
                 # 用后台已经开着的浏览器读笔记，别另起 Playwright 实例（同线程会冲突）
                 xb = self._xhs()
                 info = xb.fetch_note(aid, url=it.get("url")) or {}
@@ -440,19 +446,35 @@ class Worker:
                 urls = [vu] if vu else []
                 referer = "https://www.xiaohongshu.com/"
             else:
-                b = self._browser()
-                d = b.fetch_detail(aid) or {}
-                urls = d.get("play_urls") or []
-                if urls:
-                    db.update(it["id"], play_url=urls[0], play_url_ts=time.time())
                 referer = "https://www.douyin.com/"
-            if not urls:
-                if (it.get("platform") or "douyin") == "xhs":
+                urls = []
+                stored = (it.get("play_url") or "").strip()
+                if stored:
+                    # 先直接试着下：很多地址其实没过期，不用每次都开浏览器问一遍
+                    try:
+                        cache.download([stored], dest, item_id=it["id"],
+                                       title=it.get("title") or "", referer=referer)
+                        ok = True
+                    except Exception:
+                        try:
+                            dest.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                if not ok:
+                    b = self._browser()
+                    d = b.fetch_detail(aid) or {}
+                    urls = d.get("play_urls") or []
+                    if urls:
+                        db.update(it["id"], play_url=urls[0], play_url_ts=time.time())
+            if not urls or ok:
+                if ok:
+                    pass
+                elif (it.get("platform") or "douyin") == "xhs":
                     db.update(it["id"], media_type="note")
                     ok = True                       # 小红书图文没有视频，不算失败
                 else:
                     raise douyin.DouyinError("取不到播放地址")
-            else:
+            elif urls:
                 cache.download(urls, dest, item_id=it["id"], title=it.get("title") or "",
                                referer=referer)
                 ok = True
