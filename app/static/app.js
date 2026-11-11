@@ -3290,12 +3290,12 @@ function skCard(s, rank) {
   // 取第一个真正有本地封面的来源（都已校验过属于该条，不会张冠李戴）
   const c = ((s.sources || []).find(x => x.cover && x.cover.startsWith("/files/")) || {}).cover || null;
   const p = s.priority || 1;
-  return `<div class="sk-card" data-sid="${esc(s.id)}">
+  return `<div class="sk-card${rank === 1 ? " sk-first" : ""}" data-sid="${esc(s.id)}">
     <div class="sk-row">
       ${skCover(c, s.name)}
       <div class="sk-main">
-        <div class="sk-title"><b>${esc(s.name)}</b>
-          <span class="chip ${p >= 4 ? "warn" : "gray"}">P${p}</span>
+        <div class="sk-title"><b>${esc(s.name)}</b>${rank === 1 ? `<span class="chip teal">今天就做这个</span>` : ""}
+          ${s.status === "later" ? `<span class="chip gray">暂缓</span>` : `<span class="chip ${p >= 4 ? "warn" : "gray"}">P${p}</span>`}
           <span class="chip gray">${esc(s.category)}</span>
           ${s.already ? `<span class="chip teal">已装</span>` : ""}
           ${s.learned ? `<span class="chip teal">已学</span>` : ""}
@@ -3308,7 +3308,7 @@ function skCard(s, rank) {
         <div class="sk-src">来源：${(s.sources || []).slice(0, 3).map(x => `<a href="#/item/${x.id}" title="本地笔记已校验">${esc(x.title)}</a>`).join(" · ") || "—"}</div>
       </div>
       <div class="sk-btns">
-        <button class="btn sm" data-smark="${esc(s.id)}" data-field="installed">${s.installed ? "取消已装" : "标为已装"}</button>
+        <button class="btn sm" data-smark="${esc(s.id)}" data-field="installed">${(s.installed || s.already) ? "取消已装" : "标为已装"}</button>
         <button class="btn sm ghost" data-smark="${esc(s.id)}" data-field="ignored">不看这条</button>
       </div>
     </div>

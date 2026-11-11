@@ -319,6 +319,8 @@ def _brain(skills, local, log=print):
            "挑出最值得现在动手的。" + NL +
            "规则：只评 AI / 学习相关；已装过的工具降权并说明；明显过时/被替代/停服的标 obsolete=true；" +
            "每条给 priority(1-5，5最高)、why(一句话，结合他的情况)、action(具体下一步)。" + NL +
+           "边界：action 只能是 AI 工具/编程/提示词/学习类动作；不要建议健身、健康、饮食、睡眠、穿搭、摄影器材；" +
+           "不要引用任何健康或财务数据。" + NL +
            '只输出 JSON：{"items":[{"id":"...","priority":5,"why":"...","action":"...","obsolete":false}]}' + NL + NL +
            "【本机全局情况】" + json.dumps(local, ensure_ascii=False)[:1200] + NL + NL)
     out = {}
