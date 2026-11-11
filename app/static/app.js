@@ -3400,7 +3400,7 @@ async function renderSkills(tab) {
           <span class="muted small" style="display:block;margin-top:8px">PATH 探测到（不参与推荐）</span>
           <div>${(local.installed || []).map(x => `<span class="chip gray">${esc(x)}</span>`).join(" ") || "无"}</div></div>
         <div><span class="muted small">主要分类</span><div>${Object.entries(local.top_cats || {}).map(([k, v]) => `<span class="chip gray">${esc(k)} ${v}</span>`).join(" ")}</div></div>
-        <div><span class="muted small">记忆库偏好（仅本机显示，不上传）</span><div class="muted small sk-prefs">${(local.prefs || []).slice(0, 3).map(x => esc(String(x).slice(0, 46))).join("<br>") || "未读取"}</div></div>
+        <div><span class="muted small">记忆库偏好（仅本机显示，不上传）</span><div class="muted small sk-prefs">${(local.prefs || []).slice(0, 2).map(x => esc(String(x).slice(0, 38))).join("<br>") || "未读取"}</div></div>
       </div></div>
 
     <div class="tabs" id="skTabs" style="margin-bottom:14px">
