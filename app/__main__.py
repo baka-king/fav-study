@@ -236,6 +236,7 @@ def main():
     ap = argparse.ArgumentParser(description="抖音收藏学习平台")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true", help="启动后不自动打开窗口")
+    ap.add_argument("--tray", action="store_true", help="后台常驻：不打开浏览器窗口（托盘由 tray.ps1 负责）")
     a = ap.parse_args()
 
     _detach_console()
@@ -290,7 +291,7 @@ def main():
     _free_stale_port(a.port)
 
     try:
-        serve(a.port, not a.no_browser)
+        serve(a.port, not a.no_browser and not a.tray)
     except SystemExit:
         raise
     except Exception as e:

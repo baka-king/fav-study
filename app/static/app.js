@@ -135,6 +135,10 @@ function applyTheme(name) {
 })();
 /* 侧边栏的小圆钮：循环切换 跟随系统 → 浅色 → 纯白 → 深色 */
 document.addEventListener("DOMContentLoaded", () => {
+  // 心跳：让 launch.vbs 知道窗口还开着，避免每次双击都重开一个浏览器窗口
+  const beat = () => { if (!document.hidden) fetch("/api/heartbeat", { cache: "no-store" }).catch(() => {}); };
+  beat();
+  setInterval(beat, 5000);
   const btn = document.getElementById("themeBtn");
   if (!btn) return;
   const order = ["auto", "light", "white", "dark"];

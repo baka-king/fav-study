@@ -16,6 +16,8 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+_UI_SEEN = [0.0]  # 最近一次界面心跳时间
+
 from . import __version__, backup, bili, cache, cataudit, classify, config, db, deep, imgcache, douyin, douyin_actions, dsh, insights, llm, notes, ocr, recheck, skills, transcribe, weekly, winfocus, xhs
 from .worker import Worker, scan_inbox
 
@@ -696,6 +698,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
+        if path == "/api/focus":
+            # 界面还活着吗：前端每 5 秒打一次心跳，launch.vbs 据此决定要不要重开窗口
+            return self._json({"focused": (time.time() - _UI_SEEN[0]) < 12})
+        if path == "/api/heartbeat":
+            _UI_SEEN[0] = time.time()
+            return self._json({"ok": True})
         if path == "/api/ping":
             # 启动器探活用：不读数据库、不读配置，必须秒回
             return self._json({"ok": True, "version": __version__})
