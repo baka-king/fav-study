@@ -687,6 +687,24 @@ class Worker:
     def _fail(self, it, msg, retry):
         cur = db.get(it["id"]) or it
         attempts = (cur.get("attempts") or 0) + 1
+        # 小红书整体被风控 / 登录失效：连错 5 次就收手，别把剩下几百条都刷成失败
+        if "通用页/验证页" in msg:
+            self._xhs_bad = getattr(self, "_xhs_bad", 0) + 1
+            db.update(it["id"], status="failed", reason=msg, attempts=attempts)
+            self.log(f"[{it['id']}] ✗ 失败：{msg}")
+            if self._xhs_bad >= 5:
+                n = db.conn().execute(
+                    "UPDATE items SET status='failed', attempts=attempts+1, "
+                    "reason='小红书需要重新登录（连续 5 条返回验证页，已批量停止）' "
+                    "WHERE status IN ('queued','retry_wait','fetching') "
+                    "AND COALESCE(platform,'')='xhs'").rowcount
+                db.conn().commit()
+                config.set_login("xhs", False)
+                self._xhs_bad = 0
+                self.log(f"⚠ 小红书连续 5 条返回验证页，已停掉剩下 {n} 条。"
+                         "请点「登录小红书」重新扫码，再点「重试失败」继续。")
+            return
+        self._xhs_bad = 0
         # AI 没余额 / 无权限：整批停下，别把剩下几百条都跑成失败
         if ("余额不足" in msg or "402" in msg) and "无权限" in msg:
             db.update(it["id"], status="failed", reason=msg, attempts=attempts)
