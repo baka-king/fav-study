@@ -104,6 +104,7 @@ DEFAULTS = {
                     "以及摄影与剪辑（拍摄、修图、调色、布光）、美食与烹饪（含减脂餐）、"
                     "健身与健康、穿搭与美妆、学习与成长、副业与赚钱的方法"),
     "only_relevant": True,              # 只保留和关注主题相关的视频
+    "xhs_enabled": True,                # 小红书是否参与处理（账号异常时可从界面关掉）
     "categories": DEFAULT_CATEGORIES,
     "asr_engine": "auto",               # auto / mlx / faster —— auto：苹果芯片 Mac 用 mlx，其他用 faster-whisper
     "mlx_model": "mlx-community/whisper-large-v3-turbo",

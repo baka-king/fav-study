@@ -236,6 +236,9 @@ class Worker:
                     if ok and kw.get("sync"):
                         self._sync_xhs(kw.get("limit", 50), True)
                 elif cmd == "xhs_sync":
+                    if not config.load().get("xhs_enabled", True):
+                        self.log("小红书已暂停处理（界面点「恢复处理小红书」就能继续），这次不同步")
+                        continue
                     self._sync_xhs(kw.get("limit", 50), kw.get("then_process", True))
                 elif cmd == "check_login":
                     try:

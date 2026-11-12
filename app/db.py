@@ -273,9 +273,14 @@ def count_remote_covers():
 
 
 def next_queued():
-    return _row(conn().execute(
-        "SELECT * FROM items WHERE status='queued' AND COALESCE(deleted_at,0)=0 "
-        f"ORDER BY COALESCE(queue_prio,0) DESC, {PRIORITY_SQL} id LIMIT 1").fetchone())
+    from . import config
+    s = config.load()
+    sql = ("SELECT * FROM items WHERE status='queued' AND COALESCE(deleted_at,0)=0 ")
+    # 小红书被临时关掉时，队列里跳过它的条目，别的平台照常跑
+    if not s.get("xhs_enabled", True):
+        sql += "AND COALESCE(platform,'')<>'xhs' "
+    sql += f"ORDER BY COALESCE(queue_prio,0) DESC, {PRIORITY_SQL} id LIMIT 1"
+    return _row(conn().execute(sql).fetchone())
 
 
 def skip_by_category(cats=SKIP_CATS, reason="生活/娱乐类内容，不拆解"):

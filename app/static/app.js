@@ -1999,6 +1999,7 @@ async function renderProcess() {
   const rt = route();
   if (rt.tab && TABS.some((t) => t[0] === rt.tab)) procTab = rt.tab;
   const s = STATE.settings;
+  const xhsOff = STATE.xhs_enabled === false;
   view.innerHTML = `
     <div class="acct-bar" id="acctBar">
       <span class="acct" id="acctDouyin"><i class="dot ok"></i><b>抖音</b><em>检测中…</em></span>
@@ -2011,7 +2012,7 @@ async function renderProcess() {
     <div class="card sync-card">
       <div class="sync-intro">
         <h2>同步抖音收藏夹 <span class="chip gray" id="dyLoginChip">未检测</span></h2>
-        <p class="muted small">会弹出浏览器窗口，第一次需要用抖音 App 扫码登录（只登录一次）。读取时会自动慢慢滚动，请不要关闭那个窗口。之前失败的视频会自动重新排队。</p>
+        <p class="muted small">后台浏览器读取，<b>窗口不会显示</b>（只登录时需要你扫一次码）。读取时自动慢慢滚动，之前失败的视频会自动重新排队。</p>
       </div>
       <div class="sync-form">
         <div class="field"><label>读取哪个列表</label><select id="sKind"><option value="collection">我的收藏</option><option value="like">我的喜欢</option></select></div>
@@ -2020,12 +2021,14 @@ async function renderProcess() {
     </div>
     <div class="card sync-card">
       <div class="sync-intro">
-        <h2>小红书 <span class="chip gray" id="xhsLoginChip">未检测</span></h2>
+        <h2>小红书 <span class="chip gray" id="xhsLoginChip">未检测</span>
+          <span class="chip ${xhsOff ? "warn" : "teal"}" id="xhsStateChip">${xhsOff ? "已暂停处理" : "处理中"}</span></h2>
         <p class="muted small">第一次要点「登录小红书」用小红书 App 扫码（只登录一次）。之后可以一键同步你的「收藏」，和抖音一样本地转文字 + AI 提炼 + 自动分类。也支持直接粘贴小红书链接。</p>
       </div>
       <div class="sync-form">
         <div class="field"><label>同步方式</label><select id="xhsLimit"><option value="50">最近 50 条</option><option value="0">全部</option></select></div>
-        <div class="row sync-btns"><button class="btn" id="xhsLogin">登录小红书</button><button class="btn primary" id="xhsSync">同步收藏</button></div>
+        <div class="row sync-btns"><button class="btn" id="xhsLogin">登录小红书</button><button class="btn primary" id="xhsSync">同步收藏</button>
+          <button class="btn ghost" id="xhsToggle">${xhsOff ? "恢复处理小红书" : "暂停处理小红书"}</button></div>
       </div>
     </div>
     <div class="card sync-card">
@@ -2074,6 +2077,12 @@ async function renderProcess() {
   $("#acctCheck") && ($("#acctCheck").onclick = async () => {
     toast("正在检查两个平台的登录状态，稍等十几秒…");
     await api("/api/login/check", {});
+  });
+  $("#xhsToggle") && ($("#xhsToggle").onclick = async () => {
+    const nowOff = STATE.xhs_enabled === false;
+    const r = await api("/api/xhs/toggle", { enabled: nowOff });
+    toast(r.xhs_enabled ? "已恢复处理小红书" : "已暂停处理小红书，队列里的抖音/B站照常跑");
+    await refreshState(); renderProcess();
   });
   $("#retryFailed") && ($("#retryFailed").onclick = async () => {
     const r = await api("/api/retry_failed", {});

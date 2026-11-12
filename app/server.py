@@ -769,6 +769,7 @@ class Handler(BaseHTTPRequestHandler):
                 "login": config.login_status(),
                 "trash_n": db.trash_count(),
                 "dups_n": db.dups_count(),
+                "xhs_enabled": bool((config.load() or {}).get("xhs_enabled", True)),
                 "dy": dy_runner.snapshot(),
             }
             with _STATE_LOCK:
@@ -1067,6 +1068,11 @@ class Handler(BaseHTTPRequestHandler):
             limit = int(b.get("limit") or 0)
             worker.submit("xhs_sync", limit=limit, then_process=bool(b.get("process", True)))
             return self._json({"ok": True})
+        if path == "/api/xhs/toggle":
+            st = config.load()
+            st["xhs_enabled"] = bool(b.get("enabled", True))
+            config.save(st)
+            return self._json({"ok": True, "xhs_enabled": st["xhs_enabled"]})
         if path == "/api/login/check":
             worker.submit("check_login")
             return self._json({"ok": True})
