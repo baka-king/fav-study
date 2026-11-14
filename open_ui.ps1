@@ -30,8 +30,11 @@ if (-not (Test-Up)) {
     }
 }
 
-# 已经有窗口且页面还活着：叫到前面就行，不再开第二个
-if (Test-Focused) {
+# 已经有窗口：叫到前面就行，不再开第二个。
+# 优先看窗口本身（标题匹配），不依赖页面心跳——窗口里可能是缓存的旧页面，心跳不可靠。
+$win = Get-Process chrome, msedge -ErrorAction SilentlyContinue |
+       Where-Object { $_.MainWindowTitle -eq "收藏变笔记" }
+if ($win) {
     $shell = New-Object -ComObject WScript.Shell
     if ($shell.AppActivate("收藏变笔记")) { exit 0 }
 }
